@@ -20,6 +20,7 @@ setup:
 build: setup
 	$(PYTHON) -m mesonbuild.mesonmain compile -C $(BUILDDIR)
 	cp $(BUILDDIR)/ffcore$(EXT_SUFFIX) fastfermion/
+	ln -sf $(BUILDDIR)/compile_commands.json compile_commands.json
 
 install:
 	pip install --no-build-isolation -e .
