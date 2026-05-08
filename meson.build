@@ -12,7 +12,9 @@ project(
 
 py = import('python').find_installation(pure: false)
 
-# pybind11: try pkg-config/cmake first, fall back to -I flag via python import
+# --- Dependencies ---
+
+# pybind11: try pkg-config/cmake first, fall back to python import
 pybind11_dep = dependency('pybind11', required: false)
 if not pybind11_dep.found()
   pybind11_cmd = run_command(
@@ -28,17 +30,33 @@ if not pybind11_dep.found()
   endif
 endif
 
-ff_version = meson.project_version()
+# OpenMP: optional, enables shared-memory parallelism
+omp_dep = dependency('openmp', required: false)
+
+ff_deps = [pybind11_dep]
+ff_args = ['-DFF_VERSION="' + meson.project_version() + '"']
+
+if omp_dep.found()
+  ff_deps += omp_dep
+  ff_args += '-DFF_OPENMP'
+  message('OpenMP: enabled')
+else
+  message('OpenMP: not found, building without shared-memory parallelism')
+endif
+
+# --- Extension module ---
 
 ffcore = py.extension_module(
   'ffcore',
   'src/python_bind.cpp',
   subdir: 'fastfermion',
-  dependencies: pybind11_dep,
+  dependencies: ff_deps,
   include_directories: ['src', 'src/hashmap'],
-  cpp_args: ['-DFF_VERSION="' + ff_version + '"'],
+  cpp_args: ff_args,
   install: true,
 )
+
+# --- Python package files ---
 
 py.install_sources(
   'fastfermion/__init__.py',
