@@ -38,19 +38,20 @@ from Python. See the `examples` folder to get started, or check out [this tour o
 
 ### Building from source
 
-Assuming you have a modern C++ compiler, simply run from the root directory of the package:
+Requires a C++20 compiler, Python >= 3.10, and [meson](https://mesonbuild.com/):
 
 ```shell
-make ffcore
+pip install meson meson-python pybind11
+pip install --no-build-isolation -e .
 ```
 
-This will create a binary file `ffcore...` inside the `fastfermion` subdirectory.
-To import the package in Python, just add the root fastfermion directory in your path, e.g.,
+Or, to compile without installing:
 
-```python
->>> import sys
->>> sys.path.insert(0,"/path/to/fastfermion")
->>> import fastfermion
+```shell
+make build          # runs meson setup + compile
+make test           # runs the test suite (needs pytest, scipy)
 ```
 
-You could also use the library directly in your C++ project (even though the library was primarily intended to be used in Python). It is header-only, so you can just include the relevant header files from `src/`.
+Override the Python interpreter with `make PYTHON=/path/to/python build`.
+
+The C++ library is header-only (`src/*.h`), so it can also be included directly in a C++ project.

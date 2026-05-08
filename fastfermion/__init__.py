@@ -8,9 +8,17 @@ fastfermion module
 
 from .ffcore import *
 from .ffcore import __version__
-from ._cirq import from_cirq, to_cirq, to_paulisum
-from ._of import *
 from ._parse import *
+
+try:
+    from ._cirq import from_cirq, to_cirq, to_paulisum
+except ImportError:
+    pass
+
+try:
+    from ._of import *
+except ImportError:
+    pass
 
 
 def coefficient(p,op):

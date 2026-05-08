@@ -1,41 +1,32 @@
-PYTHON = python3
+# fastfermion build via meson
+#
+# Quick start:
+#   pip install meson meson-python pybind11   # build dependencies
+#   make build                                # compile C++ extension
+#   pip install --no-build-isolation -e .     # install into current env
+#   make test                                 # run tests (needs pytest, scipy)
+#
+# Override the Python interpreter:
+#   make PYTHON=/path/to/python build
 
-# Python stuff
-# (`python3 -m site --user-site` returns the site-packages directory)
-PYTHON_EXTENSION_SUFFIX := $(shell ${PYTHON}-config --extension-suffix)
-PYBIND11_INCLUDES := $(shell ${PYTHON} -m pybind11 --includes)
+PYTHON ?= python3
+BUILDDIR := builddir
 
-$(info PYTHON_EXTENSION_SUFFIX = $(PYTHON_EXTENSION_SUFFIX))
-$(info PYBIND11_INCLUDES = $(PYBIND11_INCLUDES))
+.PHONY: setup build install test clean
 
-# Compilation flags for the Python module
-OPTFLAGS = -O3 -DNDEBUG
-CCFLAGS = -Wall -shared -std=c++2a -fPIC $(PYBIND11_INCLUDES)
-ifeq ($(shell uname -s), Darwin)
-	CCFLAGS += -undefined dynamic_lookup
-endif
+setup:
+	$(PYTHON) -m mesonbuild.mesonmain setup $(BUILDDIR)
 
-ffcore: src/*.h src/python_bind.cpp
-	g++ $(OPTFLAGS) $(CCFLAGS) -DFF_VERSION=\"dev$(shell date '+%Y-%m-%d.%H-%M-%S')\" src/python_bind.cpp -o fastfermion/ffcore$(PYTHON_EXTENSION_SUFFIX)
-
-pytest:
-	pytest ./test
-
-cpptest: src/*.h cpptest/*.h cpptest/run_test.cpp
-	g++ -O3 -std=c++2a cpptest/run_test.cpp -o cpptest/run_test
-
-# Uses gcovr
-testcov:
-	(rm ./fastfermion/*.gcda && \
-	g++ $(CCFLAGS) -DFF_VERSION=\"devcov\" --coverage -g src/python_bind.cpp -o fastfermion/ffcore$(PYTHON_EXTENSION_SUFFIX) && \
-	pytest ./test && \
-	gcovr ./fastfermion/)
-
-# Invokes setup.py
-# Will create wheel and store it in dist folder
-build-wheel:
-	python3 -m build --wheel
+build: setup
+	$(PYTHON) -m mesonbuild.mesonmain compile -C $(BUILDDIR)
 
 install:
-	pip3 uninstall fastfermion
-	pip3 install --user $(shell ls -rt ./dist/fastfermion-*.whl | tail -n 1)
+	pip install --no-build-isolation -e .
+
+test:
+	$(PYTHON) -m pytest test/ -v
+
+clean:
+	rm -rf $(BUILDDIR) build/ dist/ *.egg-info
+	rm -f fastfermion/ffcore*.so
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
