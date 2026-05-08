@@ -8,7 +8,7 @@
 
 namespace fastfermion {
 
-template<class T=double>
+template <class T = double>
 struct Matrix {
     int shape[2];
     std::vector<T> data;
@@ -19,34 +19,34 @@ struct Matrix {
     Matrix(int m_arg, int n_arg) {
         shape[0] = m_arg;
         shape[1] = n_arg;
-        data = std::vector<T>(shape[0]*shape[1], 0);
+        data = std::vector<T>(shape[0] * shape[1], 0);
     }
-    constexpr T& operator()(int i, int j) { return data[shape[1]*i+j]; }
+    constexpr T& operator()(int i, int j) { return data[shape[1] * i + j]; }
 };
 
-template<class T=double>
+template <class T = double>
 struct CSCMatrix {
     int shape[2];
-    std::vector<std::size_t> indptr; // of size equal to shape[1]+1
-    std::vector<std::size_t> indices; // row indices
+    std::vector<std::size_t> indptr;   // of size equal to shape[1]+1
+    std::vector<std::size_t> indices;  // row indices
     std::vector<T> data;
     CSCMatrix(int m, int n) {
         shape[0] = m;
         shape[1] = n;
         // Fill indptr
-        indptr = std::vector<std::size_t>(n+1, 0);
+        indptr = std::vector<std::size_t>(n + 1, 0);
     }
-    CSCMatrix() : CSCMatrix(0,0) { }
+    CSCMatrix() : CSCMatrix(0, 0) {}
     Matrix<T> todense() const {
         // assertm(indptr.size() == shape[1]+1, "CSCMatrix is not well-formed");
-        Matrix<T> A(shape[0],shape[1]);
-        for(int j=0; j<shape[1]; j++) {
-            for(int k=indptr[j]; k<indptr[j+1]; k++) {
-                A(indices[k],j) += data[k];
+        Matrix<T> A(shape[0], shape[1]);
+        for (int j = 0; j < shape[1]; j++) {
+            for (int k = indptr[j]; k < indptr[j + 1]; k++) {
+                A(indices[k], j) += data[k];
             }
         }
         return A;
     }
 };
 
-}
+}  // namespace fastfermion

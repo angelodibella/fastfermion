@@ -6,16 +6,22 @@
 
 #pragma once
 
-#include "matrix.h"
 #include "majorana_algebra.h"
+#include "matrix.h"
 #include "transforms.h"
 
 namespace fastfermion {
 
 CSCMatrix<ff_complex> MajoranaString::sparse() const { return majorana_to_pauli(*this).sparse(); }
-CSCMatrix<ff_complex> MajoranaString::sparse(int n) const { return majorana_to_pauli(*this).sparse(n); }
-
-CSCMatrix<ff_complex> MajoranaPolynomial::sparse() const { return majorana_to_pauli(*this).sparse(); }
-CSCMatrix<ff_complex> MajoranaPolynomial::sparse(int n) const { return majorana_to_pauli(*this).sparse(n); }
-
+CSCMatrix<ff_complex> MajoranaString::sparse(int n) const {
+    return majorana_to_pauli(*this).sparse(n);
 }
+
+CSCMatrix<ff_complex> MajoranaPolynomial::sparse() const {
+    return majorana_to_pauli(*this).sparse();
+}
+CSCMatrix<ff_complex> MajoranaPolynomial::sparse(int n) const {
+    return majorana_to_pauli(*this).sparse(n);
+}
+
+}  // namespace fastfermion

@@ -6,11 +6,12 @@
 
 #pragma once
 
-#include <stdexcept>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 
-#define throw_error(message) \
-    do { \
-        std::cerr << message << std::endl; throw std::runtime_error((std::stringstream("") << message).str()); \
+#define throw_error(message)                                                \
+    do {                                                                    \
+        std::cerr << message << std::endl;                                  \
+        throw std::runtime_error((std::stringstream("") << message).str()); \
     } while (false)

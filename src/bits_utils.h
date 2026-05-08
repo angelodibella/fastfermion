@@ -11,7 +11,7 @@
 
 namespace fastfermion {
 
-template<int N>
+template <int N>
 int merge_parity(const BitSet<N>& x, const BitSet<N>& y) {
     // Given two sets x = {x_1, ..., x_k} and y = {y_1, ..., y_l}
     // returns T mod 2 where T = the number of pairs (i,j) such that x_i < y_j.
@@ -29,13 +29,15 @@ int merge_parity(const BitSet<N>& x, const BitSet<N>& y) {
 
     // Iterate over y_1 > ... > y_l
     int tot = 0;
-    for(int cur_bit=y.rbegin(); cur_bit != y.rend(); cur_bit = y.rnext(cur_bit)) {
-        tot += (x & BitSet<N>::range(cur_bit)).popcount(); // Count number of bits in x having a position strictly smaller than cur_bit
+    for (int cur_bit = y.rbegin(); cur_bit != y.rend(); cur_bit = y.rnext(cur_bit)) {
+        tot +=
+            (x & BitSet<N>::range(cur_bit)).popcount();  // Count number of bits in x having a
+                                                         // position strictly smaller than cur_bit
     }
     return tot % 2;
 }
 
-template<int N>
+template <int N>
 std::pair<BitSet<N>, int> shuffle_with_parity(const BitSet<N>& S, const std::vector<int>& map) {
     // Given a set S = {s_1 > s_2 > ... > s_m} represented as a bitstring,
     // and an injective map pi:{0,1,...} -> {0,1,...}, returns T (a bitset)
@@ -59,26 +61,28 @@ std::pair<BitSet<N>, int> shuffle_with_parity(const BitSet<N>& S, const std::vec
     int new_pos;
     int inv = 0;
     int map_size = map.size();
-    for(int pos = S.rbegin() ; pos != S.rend(); pos = S.rnext(pos)) {
-        //assertm(pos < map.size(), "pos = " << pos << ", map.size() = " << map.size());
-        new_pos = pos < map_size ? map[pos] : pos; // If map[pos] is not defined, we assumed map[pos] = pos (identity)
+    for (int pos = S.rbegin(); pos != S.rend(); pos = S.rnext(pos)) {
+        // assertm(pos < map.size(), "pos = " << pos << ", map.size() = " << map.size());
+        new_pos = pos < map_size
+                      ? map[pos]
+                      : pos;  // If map[pos] is not defined, we assumed map[pos] = pos (identity)
         assert(new_pos >= 0 && new_pos < BitSet<N>::DIGITS);
         assert(!new_S.at(new_pos));
         // if(new_S.at(new_pos)) {
         //  // It seems this is not an injective map: two different sites map to the same location.
-        //  throw_error("Given permutation is not valid; the pre-image of " << new_pos << " is not unique");
+        //  throw_error("Given permutation is not valid; the pre-image of " << new_pos << " is not
+        //  unique");
         // }
         // Count the number of bits in new_S which are at a position < new_pos
         // This is precisely |{s' > pos : pi(s') < pi(pos)}|
         inv += (new_S & BitSet<N>::range(new_pos)).popcount();
         new_S.set(new_pos);
     }
-    return std::make_pair(new_S, inv%2 == 0 ? 1 : -1);
+    return std::make_pair(new_S, inv % 2 == 0 ? 1 : -1);
 }
 
-
 // ------------- BIT PERMUTATION FUNCTIONS --------------------
-template<int N>
+template <int N>
 BitSet<N> move_bits(const BitSet<N>& a, const std::vector<int>& map) {
     // If we think of a as a bitstring a[0], ... a[n-1], and map : {0,...,n-1} -> {0,...,n-1}
     // Then this function returns the new bit string b such that
@@ -89,9 +93,9 @@ BitSet<N> move_bits(const BitSet<N>& a, const std::vector<int>& map) {
     // Naive method
     BitSet<N> b(0);
     int map_size = map.size();
-    for(int pos = a.begin(); pos != a.end(); pos = a.next(pos)) {
-        if(pos < map_size) {
-            if(map[pos] < 0 || map[pos] >= N*WORD_LENGTH) {
+    for (int pos = a.begin(); pos != a.end(); pos = a.next(pos)) {
+        if (pos < map_size) {
+            if (map[pos] < 0 || map[pos] >= N * WORD_LENGTH) {
                 throw_error("Invalid map value " << map[pos] << " at " << pos);
             }
             b.set(map[pos]);
@@ -102,21 +106,22 @@ BitSet<N> move_bits(const BitSet<N>& a, const std::vector<int>& map) {
     return b;
 }
 
-template<int N>
+template <int N>
 BitSet<N> fliplr_bits(const BitSet<N>& a, int n) {
-    // If we think of a as a bitstring a[0], ... a[n-1], then this function returns the new bit string b such that
+    // If we think of a as a bitstring a[0], ... a[n-1], then this function returns the new bit
+    // string b such that
     //      b[j] = a[n-1-j], j=0,...,n-1
     //      b[j] = 0 for j >= n
     // Note: b's bits beyond position n-1 are set to 0 no matter what a's bits were
     // Naive method
     BitSet<N> b(0);
-    for(int pos=a.begin(); pos != a.end() && pos < n; pos = a.next(pos)) {
-        b.set(n-1-pos);
+    for (int pos = a.begin(); pos != a.end() && pos < n; pos = a.next(pos)) {
+        b.set(n - 1 - pos);
     }
     return b;
 }
 
-template<int N>
+template <int N>
 BitSet<N> swap_even_odd(const BitSet<N>& a) {
     // One-liner:
     //   return ((a & even_mask) << 1) | ((a & odd_mask) >> 1)
@@ -124,7 +129,7 @@ BitSet<N> swap_even_odd(const BitSet<N>& a) {
     BitSet<N> y(a);
     constexpr std::uint64_t _even_mask = 0x5555555555555555;
     constexpr std::uint64_t _odd_mask = 0xAAAAAAAAAAAAAAAA;
-    for(std::size_t i=0; i<N; ++i) {
+    for (std::size_t i = 0; i < N; ++i) {
         x.words[i] &= _even_mask;
         y.words[i] &= _odd_mask;
     }
@@ -133,14 +138,14 @@ BitSet<N> swap_even_odd(const BitSet<N>& a) {
     return (x | y);
 }
 
-template<int N>
+template <int N>
 void swap_bits_inplace(BitSet<N>& b, int i, int j) {
     // Swap bits i and j of b
     // See https://graphics.stanford.edu/~seander/bithacks.html#SwappingBitsXOR
     // Compute x = XOR(b[i],b[j])
     // Set b[i] = XOR(b[i],x)
     // and b[j] = XOR(b[j],x)
-    BitSet<N> x = ((b >> i) ^ (b >> j)) & BitSet<N>(1ULL); // Single bit
+    BitSet<N> x = ((b >> i) ^ (b >> j)) & BitSet<N>(1ULL);  // Single bit
     b ^= (x << i) | (x << j);
 }
 
@@ -159,10 +164,10 @@ void interleave(const std::uint64_t& a, std::uint64_t* y) {
     y[1] = (a & (0xFFFFFFFF00000000)) >> 32;
 
     static const std::uint64_t B[] = {
-        0x5555555555555555, // 0101010101010101...0101
-        0x3333333333333333, // 0011001100110011...0011
-        0x0F0F0F0F0F0F0F0F, // 0000111100001111...1111
-        0x00FF00FF00FF00FF, // 0000000011111111...1111
+        0x5555555555555555,  // 0101010101010101...0101
+        0x3333333333333333,  // 0011001100110011...0011
+        0x0F0F0F0F0F0F0F0F,  // 0000111100001111...1111
+        0x00FF00FF00FF00FF,  // 0000000011111111...1111
         0x0000FFFF0000FFFF,  // ...
         0x00000000FFFFFFFF,  // ... Not used for interleaving, only used for de-interleaving
     };
@@ -170,8 +175,8 @@ void interleave(const std::uint64_t& a, std::uint64_t* y) {
 
     // y[0] and y[1] are supported on the first 32-bits only
     // assert(y[0] < (1ULL<<32) && y[1] < (1ULL<<32));
-    
-    for(std::size_t i=0; i<2; ++i) {
+
+    for (std::size_t i = 0; i < 2; ++i) {
         y[i] = (y[i] | (y[i] << S[4])) & B[4];
         y[i] = (y[i] | (y[i] << S[3])) & B[3];
         y[i] = (y[i] | (y[i] << S[2])) & B[2];
@@ -180,36 +185,34 @@ void interleave(const std::uint64_t& a, std::uint64_t* y) {
     }
 }
 
-
-template<int N>
-BitSet<2*N> interleave(const BitSet<N>& a) {
+template <int N>
+BitSet<2 * N> interleave(const BitSet<N>& a) {
     // Returns bitstring b on 2N bits where b[2i] = a[i]
     // and b[2i+1] = 0
-    
+
     // NOTE: This algorithm is linear in N
     // One can do the interleaving in logarithmic complexity in N
     // However the latter works best when N is a power of two
     // For now, since N is small we prefer the simpler implementation
 
-    BitSet<2*N> b;
-    for(std::size_t i=0; i<N; ++i) {
-        interleave(a.words[i], b.words.data()+(2*i));
+    BitSet<2 * N> b;
+    for (std::size_t i = 0; i < N; ++i) {
+        interleave(a.words[i], b.words.data() + (2 * i));
     }
 
     return b;
 }
 
 std::uint64_t deinterleave64(const std::uint64_t& y) {
-
     // De-interleaves a 64-bit y into x, i.e., returns x s.t.
     // x[i] = y[2*i] for 0 <= i < 32
     // x[i] = 0 for i >= 32
 
     static const std::uint64_t B[] = {
-        0x5555555555555555, // 0101010101010101...0101
-        0x3333333333333333, // 0011001100110011...0011
-        0x0F0F0F0F0F0F0F0F, // 0000111100001111...1111
-        0x00FF00FF00FF00FF, // 0000000011111111...1111
+        0x5555555555555555,  // 0101010101010101...0101
+        0x3333333333333333,  // 0011001100110011...0011
+        0x0F0F0F0F0F0F0F0F,  // 0000111100001111...1111
+        0x00FF00FF00FF00FF,  // 0000000011111111...1111
         0x0000FFFF0000FFFF,  // ...
         0x00000000FFFFFFFF,  // ... Not used for interleaving, only used for de-interleaving
     };
@@ -225,27 +228,25 @@ std::uint64_t deinterleave64(const std::uint64_t& y) {
 }
 
 std::uint64_t deinterleave128(const std::uint64_t& y0, const std::uint64_t& y1) {
-
     // De-interleaves a 128-bit y=(y0,y1) into x, i.e., returns x s.t.
     // x[i] = y0[2*i] for 0 <= i < 32
     // x[i] = y1[2*(i-32)] for i >= 32
 
     return deinterleave64(y0) | (deinterleave64(y1) << 32);
-
 }
 
-template<int N>
-BitSet<N/2> deinterleave(const BitSet<N>& a) {
+template <int N>
+BitSet<N / 2> deinterleave(const BitSet<N>& a) {
     // Returns bitstring b on N bits where b[i] = a[2*i]
-    
+
     // NOTE: This algorithm is linear in N
     // One can do the interleaving in logarithmic complexity in N
     // However the latter works best when N is a power of two
     // For now, since N is small we prefer the simpler implementation
 
-    BitSet<N/2> b;
-    for(std::size_t i=0; i<N/2; ++i) {
-        b.words[i] = deinterleave128(a.words[2*i], a.words[2*i+1]);
+    BitSet<N / 2> b;
+    for (std::size_t i = 0; i < N / 2; ++i) {
+        b.words[i] = deinterleave128(a.words[2 * i], a.words[2 * i + 1]);
     }
 
     return b;
@@ -254,13 +255,13 @@ BitSet<N/2> deinterleave(const BitSet<N>& a) {
 
 std::uint64_t next_combination(std::uint64_t v) {
     // Returns the next subset (represented as a bitstring) with the same cardinality as v
-    // If v is 00010011, the next patterns would be 00010101, 00010110, 00011001,00011010, 00011100, 00100011
-    // From https://graphics.stanford.edu/~seander/bithacks.html#NextBitPermutation
-    // See also https://github.com/hcs0/Hackers-Delight/blob/master/snoob.c.txt
-    std::uint64_t t = v | (v - 1); // t gets v's least significant 0 bits set to 1
-    // Next set to 1 the most significant bit to change, 
+    // If v is 00010011, the next patterns would be 00010101, 00010110, 00011001,00011010, 00011100,
+    // 00100011 From https://graphics.stanford.edu/~seander/bithacks.html#NextBitPermutation See
+    // also https://github.com/hcs0/Hackers-Delight/blob/master/snoob.c.txt
+    std::uint64_t t = v | (v - 1);  // t gets v's least significant 0 bits set to 1
+    // Next set to 1 the most significant bit to change,
     // set to 0 the least significant ones, and add the necessary 1 bits.
     return ((t + 1) | (((~t & -~t) - 1) >> (std::countr_zero(v) + 1)));
 }
 
-}
+}  // namespace fastfermion

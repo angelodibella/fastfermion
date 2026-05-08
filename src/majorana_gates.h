@@ -25,43 +25,46 @@ struct MROT {
     MajoranaString ms;
     ff_float theta;
     bool _r;
-    MROT() : ms(), theta(0), _r(0) { }
-    MROT(const MajoranaString& ms, const ff_float& theta) :
-        ms(ms), theta(theta), _r( !(ms.is_hermitian()) ) {
-    }
+    MROT() : ms(), theta(0), _r(0) {}
+    MROT(const MajoranaString& ms, const ff_float& theta)
+        : ms(ms), theta(theta), _r(!(ms.is_hermitian())) {}
     MROT(const MajoranaMonomial& mm, const ff_float& t) {
         // e^{-i t/2 M} where M is a Hermitian monomial
-        if(mm.is_hermitian()) {
+        if (mm.is_hermitian()) {
             ms = mm.s;
             _r = !mm.s.is_hermitian();
-            if(_r) {
+            if (_r) {
                 // Majorana String is not Hermitian, so necessarily mm.coeff is purely imaginary
-                theta = mm.coeff.imag()*t;
+                theta = mm.coeff.imag() * t;
             } else {
                 // Majorana String is Hermitian, so necessarily mm.coeff is purely real
-                theta = mm.coeff.real()*t;
+                theta = mm.coeff.real() * t;
             }
         } else {
-            throw_error("Supplied Majorana monomial " << format_complex(mm.coeff) << "*(" << mm.s.to_compact_string() << ") is not Hermitian");
+            throw_error("Supplied Majorana monomial " << format_complex(mm.coeff) << "*("
+                                                      << mm.s.to_compact_string()
+                                                      << ") is not Hermitian");
         }
     }
-    MROT(const MajoranaString& ms, const ff_complex& coeff, const ff_float& t) : MROT(MajoranaMonomial(ms,coeff),t) { }
+    MROT(const MajoranaString& ms, const ff_complex& coeff, const ff_float& t)
+        : MROT(MajoranaMonomial(ms, coeff), t) {}
     std::string to_string() const {
-        return std::string("MROT(") + (_r ? "1j " : "") + ms.to_compact_string() + ", theta=" + std::to_string(theta) + ") = " + 
-              (_r ? ("e^{" + std::to_string(theta/2) + " " + ms.to_compact_string() + "}")
-                  : ("e^{-i " + std::to_string(theta/2) + " " + ms.to_compact_string() + "}"));
+        return std::string("MROT(") + (_r ? "1j " : "") + ms.to_compact_string() +
+               ", theta=" + std::to_string(theta) + ") = " +
+               (_r ? ("e^{" + std::to_string(theta / 2) + " " + ms.to_compact_string() + "}")
+                   : ("e^{-i " + std::to_string(theta / 2) + " " + ms.to_compact_string() + "}"));
     }
     MajoranaPolynomial aspoly() const {
         // e^{-i theta/2 M} = cos(theta/2) - 1i*sin(theta/2)*M
         // since M^2 = 1
         MajoranaPolynomial poly;
-        poly.terms[MajoranaString()] = std::cos(theta/2);
-        poly.terms[ms] += _r ? ff_complex(std::sin(theta/2),0) : ff_complex(0,-std::sin(theta/2));
+        poly.terms[MajoranaString()] = std::cos(theta / 2);
+        poly.terms[ms] +=
+            _r ? ff_complex(std::sin(theta / 2), 0) : ff_complex(0, -std::sin(theta / 2));
         return poly;
     }
 
-    
-    template<class FilterPred>
+    template <class FilterPred>
     void apply_inplace(MajoranaPolynomial& poly, FilterPred filter_pred) const {
         // Applies in-place operation poly <- U^{dagger} poly U
         //
@@ -81,19 +84,20 @@ struct MROT {
 
         // Some precomputation
         const ff_float costheta = cos(theta);
-        const ff_complex iirsintheta = _r ? ff_complex(-sin(theta),0) : ff_complex(0,sin(theta)); // i*i^r*sin(theta)
+        const ff_complex iirsintheta =
+            _r ? ff_complex(-sin(theta), 0) : ff_complex(0, sin(theta));  // i*i^r*sin(theta)
 
         // Populate o_new
-        for(auto& [x,v] : poly.terms) {
+        for (auto& [x, v] : poly.terms) {
             if (!x.commutes(ms)) {
-                MajoranaMonomial mx = ms*x;
-                if(filter_pred(mx.s)) {
-                    o_new.emplace_back(mx.majorana_string(), v*iirsintheta*mx.coefficient());
+                MajoranaMonomial mx = ms * x;
+                if (filter_pred(mx.s)) {
+                    o_new.emplace_back(mx.majorana_string(), v * iirsintheta * mx.coefficient());
                 }
                 v *= costheta;
             }
         }
-        for (const auto& [x,v] : o_new) {
+        for (const auto& [x, v] : o_new) {
             poly.terms[x] += v;
         }
     }
@@ -103,9 +107,10 @@ struct MROT {
     }
 
     void apply_inplace(MajoranaPolynomial& poly, const int& maxdegree) const {
-        apply_inplace(poly, [&maxdegree](const MajoranaString& a) { return a.degree() <= maxdegree; });
+        apply_inplace(poly,
+                      [&maxdegree](const MajoranaString& a) { return a.degree() <= maxdegree; });
     }
-    
+
     MajoranaPolynomial operator()(const MajoranaPolynomial& o) const {
         // Apply U^{\dagger} o U
         MajoranaPolynomial ret(o);
@@ -117,9 +122,8 @@ struct MROT {
         // Apply U^{\dagger} o U
         return (*this)(MajoranaPolynomial(o));
     }
-    
 };
 
-}
+}  // namespace majorana_gates
 
-}
+}  // namespace fastfermion
