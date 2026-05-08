@@ -3,7 +3,6 @@
 # Quick start:
 #   pip install meson meson-python pybind11   # build dependencies
 #   make build                                # compile C++ extension
-#   pip install --no-build-isolation -e .     # install into current env
 #   make test                                 # run tests (needs pytest, scipy)
 #
 # Override the Python interpreter:
@@ -11,6 +10,7 @@
 
 PYTHON ?= python3
 BUILDDIR := builddir
+EXT_SUFFIX := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 
 .PHONY: setup build install test clean
 
@@ -19,12 +19,13 @@ setup:
 
 build: setup
 	$(PYTHON) -m mesonbuild.mesonmain compile -C $(BUILDDIR)
+	cp $(BUILDDIR)/ffcore$(EXT_SUFFIX) fastfermion/
 
 install:
 	pip install --no-build-isolation -e .
 
-test:
-	$(PYTHON) -m pytest test/ -v
+test: build
+	cd test && $(PYTHON) -m pytest . -v
 
 clean:
 	rm -rf $(BUILDDIR) build/ dist/ *.egg-info

@@ -22,6 +22,7 @@
 #include "pauli_algebra.h"
 #include "pauli_gates.h"
 #include "pauli_propagation.h"
+#include "pauli_propagation_omp.h"
 #include "pauli_sparse.h"
 #include "qubitproductstate.h"
 #include "transforms.h"
@@ -421,6 +422,25 @@ void add_pauli_propagation(py::module_& m) {
         >>> circuit = [H(0),CNOT(0,1)]
         >>> observable = PauliString("XZ")
         >>> result = propagate(circuit,observable,maxdegree=3,mincoeff=1e-8)
+        )DOC");
+
+    m.def(
+        "propagate_omp",
+        [](const pauli_gates::Circuit& circuit,
+           const std::variant<PauliString, PauliPolynomial>& observable, int n_threads,
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff) {
+            int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
+            ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
+            PauliPolynomial obs = (observable.index() == 0)
+                                      ? PauliPolynomial(std::get<0>(observable))
+                                      : std::get<1>(observable);
+            return pauli_gates::propagate_omp(circuit, obs, n_threads, _maxdegree, _mincoeff);
+        },
+        py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
+        py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
+        R"DOC(
+        OpenMP-parallel Pauli propagation. Falls back to serial when n_threads=1.
+        Same interface as propagate(), with an additional n_threads parameter.
         )DOC");
 }
 
