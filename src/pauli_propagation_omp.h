@@ -5,7 +5,6 @@
 #pragma once
 
 #include "common.h"
-
 #include "pauli_propagation.h"
 
 #ifdef FF_OPENMP
@@ -44,7 +43,7 @@ PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, 
 
             // Clear but keep allocated memory
             obs_snap.clear();
-            obs_snap.insert(obs_snap.end(),obs.terms.begin(),obs.terms.end());
+            obs_snap.insert(obs_snap.end(), obs.terms.begin(), obs.terms.end());
 
             const ROT& gate = std::get<ROT>(circuit[i]);
             const PauliString& ps = gate.ps;
@@ -83,7 +82,7 @@ PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, 
                 }
             }
 
-            // Rebuild
+            // Serial rebuild into hash map (see pauli_sorted.h for the sorted-array alternative)
             obs.terms.clear();
             for (int t = 0; t < n_threads; t++) {
                 for (const auto& [x, coeff] : all_kept[t]) obs.terms[x] += coeff;
