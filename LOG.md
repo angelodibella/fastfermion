@@ -47,3 +47,61 @@ Implemented in `src/pauli_sorted.h`:
 **Tests:** 20 tests (10 serial sorted + 10 parallel sorted), all passing. Total: 71 ff tests + 42 majorana = 113.
 
 **Current state:** four propagation backends available (`propagate`, `propagate_omp`, `propagate_sorted`, `propagate_sorted_omp`). Next step: CPU benchmarking to determine crossover points and whether the sorted parallel path actually outperforms serial at realistic K_m.
+
+## 2026-05-09: Top-K truncation, X-truncation, gate batching
+
+Added three features to all backends:
+
+- **Top-K truncation** (`truncate_top_k`): retain the K largest-magnitude terms. Uses `std::nth_element` (O(K) average). Gives a fixed memory budget, important for GPU stability. Source: Shao, Cheng & Liu 2025.
+- **X-truncation** (`truncate_x_weight`): discard strings with X-weight exceeding a threshold. Applied every `xtrunc_period` gates. Source: Begušić & Chan 2025.
+- **Gate batching** (`propagate_batched` in `pauli_batched.h`): partition consecutive ROT gates into maximal batches of mutually commuting gates, apply each batch in a single pass. Reduces the number of emit-merge-truncate cycles. Truncation is once per batch (not per gate), so results differ from per-gate truncation by O(tau).
+
+All five backends now support: `mincoeff`, `maxdegree`, `topk`, `max_xweight`, `xtrunc_period`.
+
+**Tests:** 87 ff tests + 42 majorana = 129 passing.
+
+## 2026-05-09: Per-gate cost analysis and sorted-path bottleneck
+
+### Profiling results (TFIM, n=24, order 2, N=50)
+
+K_m depends on tau (not n) — operator spreading is contained within ~20 qubits at T=1:
+
+| tau    | K      | hash (s) | sorted (s) | sorted/hash |
+|--------|--------|----------|------------|-------------|
+| 1e-08  |  4,092 | 0.051    | 0.099      | 1.94x       |
+| 1e-10  | 11,245 | 0.122    | 0.214      | 1.75x       |
+| 1e-12  | 27,065 | 0.313    | 0.561      | 1.79x       |
+| 1e-14  | 60,115 | 0.718    | 1.329      | 1.85x       |
+
+Hash serial outperforms sorted serial at all tested K values. OMP versions are slower than serial (thread overhead dominates at K < 10^5).
+
+### Analysis
+
+Each gate processes K active terms through: emit O(K) → merge → truncate. The backends differ only in the merge:
+
+- **Hash-map merge:** K_a random insertions at cost C_h each.
+- **Sorted merge:** sort partners O(K_a log K_a) + two-pointer sweep O(K), all sequential at cost C_m each.
+
+Hash wins when K_a * C_h < K_a * log(K_a) * C_m, i.e., when C_h/C_m < log(K_a). With alpha = K_a/K ~ 0.5:
+
+| K       | Hash table size | Cache level | C_h/C_m | log(K_a) | Winner  |
+|---------|-----------------|-------------|---------|----------|---------|
+| 10^3    | 40 KB           | L2          | ~3      | ~9       | hash    |
+| 6*10^4  | 2.4 MB          | L3          | ~5-10   | ~15      | hash    |
+| 4*10^5  | 16 MB           | spills DRAM | ~30-100 | ~18      | sorted  |
+
+The crossover is at K ~ 4*10^5 where the hash table exceeds L3.
+
+### The sort is the bottleneck — radix sort as the fix
+
+The O(log K_a) factor comes from `std::sort` (comparison sort). Pauli string keys are pairs of `uint64_t` — fixed-width integers that admit radix sort at O(K_a) instead of O(K_a log K_a).
+
+A 2-pass radix sort (one pass per 64-bit word, 256-bucket counting sort) costs ~4 * K_a * C_m. The crossover condition becomes:
+
+    C_h/C_m > (1 + 4*alpha) / alpha = 6    (for alpha = 0.5)
+
+This shifts the crossover from K ~ 4*10^5 (comparison sort) to K ~ 10^4 (radix sort), making sorted competitive at all K values currently reachable on CPU.
+
+cuPauliProp uses exactly this approach on GPU (`cub::DeviceRadixSort`), where C_h/C_m ~ 100+ makes sorted+radix unconditionally faster.
+
+**TODO:** implement radix sort in `sorted_conjugate` as a drop-in replacement for `std::sort`, benchmark against comparison sort to verify the crossover shift.
