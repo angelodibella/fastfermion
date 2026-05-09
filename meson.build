@@ -14,20 +14,19 @@ py = import('python').find_installation(pure: false)
 
 # --- Dependencies ---
 
-# pybind11: try pkg-config/cmake first, fall back to python import
-pybind11_dep = dependency('pybind11', required: false)
-if not pybind11_dep.found()
-  pybind11_cmd = run_command(
-    py, '-c', 'import pybind11; print(pybind11.get_include())',
-    check: false,
+# pybind11: prefer the Python-importable version (pip install pybind11)
+# over the system pkg-config one, which may be too old for the
+# 3-argument PYBIND11_MODULE (requires >= 2.12).
+pybind11_cmd = run_command(
+  py, '-c', 'import pybind11; print(pybind11.get_include())',
+  check: false,
+)
+if pybind11_cmd.returncode() == 0
+  pybind11_dep = declare_dependency(
+    compile_args: ['-isystem', pybind11_cmd.stdout().strip()],
   )
-  if pybind11_cmd.returncode() == 0
-    pybind11_dep = declare_dependency(
-      compile_args: ['-isystem', pybind11_cmd.stdout().strip()],
-    )
-  else
-    error('pybind11 not found. Install it: pip install pybind11')
-  endif
+else
+  pybind11_dep = dependency('pybind11', required: true)
 endif
 
 # OpenMP: optional, enables shared-memory parallelism
