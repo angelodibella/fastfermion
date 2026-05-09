@@ -23,6 +23,7 @@
 #include "pauli_gates.h"
 #include "pauli_propagation.h"
 #include "pauli_propagation_omp.h"
+#include "pauli_batched.h"
 #include "pauli_sorted.h"
 #include "pauli_sparse.h"
 #include "qubitproductstate.h"
@@ -480,6 +481,28 @@ void add_pauli_propagation(py::module_& m) {
         R"DOC(
         OpenMP-parallel sorted-array Pauli propagation.
         Falls back to serial sorted path when n_threads=1.
+        )DOC");
+
+    m.def(
+        "propagate_batched",
+        [](const pauli_gates::Circuit& circuit,
+           const std::variant<PauliString, PauliPolynomial>& observable,
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff,
+           int topk, int max_xweight, int xtrunc_period) {
+            int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
+            ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
+            PauliPolynomial obs = (observable.index() == 0)
+                                      ? PauliPolynomial(std::get<0>(observable))
+                                      : std::get<1>(observable);
+            return pauli_gates::propagate_batched(circuit, obs, _maxdegree, _mincoeff,
+                                                  topk, max_xweight, xtrunc_period);
+        },
+        py::arg("circuit"), py::arg("observable"),
+        py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
+        py::arg("max_xweight") = -1, py::arg("xtrunc_period") = 1,
+        R"DOC(
+        Gate-batched Pauli propagation.
+        Groups commuting ROT gates and applies each batch in one pass.
         )DOC");
 }
 
