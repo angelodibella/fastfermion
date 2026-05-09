@@ -6,6 +6,7 @@
 
 #pragma once
 #include <algorithm>
+#include <numeric>
 #include <vector>
 
 #include "common.h"
@@ -284,6 +285,32 @@ SortedPauliPoly sorted_conjugate_omp(const SortedPauliPoly& in, const PauliStrin
 
 #endif  // FF_OPENMP
 
+// Top-K truncation: keep only the K entries with largest |coefficient|.
+// The output is sorted but may be shorter than K if the input is smaller.
+SortedPauliPoly sorted_truncate_top_k(const SortedPauliPoly& in, int k) {
+    if (k <= 0 || (int)in.size() <= k) return in;
+
+    // Build index array, partial-sort by descending magnitude
+    std::vector<size_t> idx(in.size());
+    std::iota(idx.begin(), idx.end(), 0);
+    std::nth_element(idx.begin(), idx.begin() + k, idx.end(), [&](size_t a, size_t b) {
+        return std::abs(in.coeffs[a]) > std::abs(in.coeffs[b]);
+    });
+
+    // Take the top-K indices, sort them to preserve key order
+    idx.resize(k);
+    std::sort(idx.begin(), idx.end());
+
+    SortedPauliPoly result;
+    result.keys.reserve(k);
+    result.coeffs.reserve(k);
+    for (size_t i : idx) {
+        result.keys.push_back(in.keys[i]);
+        result.coeffs.push_back(in.coeffs[i]);
+    }
+    return result;
+}
+
 // Remove entries with |coeff| <= threshold, preserving sorted order.
 SortedPauliPoly sorted_truncate(const SortedPauliPoly& in, ff_float mincoeff) {
     SortedPauliPoly result;
@@ -302,7 +329,7 @@ namespace pauli_gates {
 
 // Serial sorted-array propagation.
 PauliPolynomial propagate_sorted(const Circuit& circuit, const PauliPolynomial& a,
-                                 int maxdegree = 128, ff_float mincoeff = 0) {
+                                 int maxdegree = 128, ff_float mincoeff = 0, int topk = 0) {
     SortedPauliPoly obs = SortedPauliPoly::from_poly(a);
 
     int clifford_begin;
@@ -327,6 +354,7 @@ PauliPolynomial propagate_sorted(const Circuit& circuit, const PauliPolynomial& 
             obs = sorted_conjugate(obs, gate.ps, gate.theta, maxdegree);
 
             if (mincoeff > 0) obs = sorted_truncate(obs, mincoeff);
+            if (topk > 0) obs = sorted_truncate_top_k(obs, topk);
         }
     }
     if (pending_clifford) {
@@ -341,9 +369,9 @@ PauliPolynomial propagate_sorted(const Circuit& circuit, const PauliPolynomial& 
 //
 // Falls back to serial sorted path when n_threads <= 1 or FF_OPENMP is not defined.
 PauliPolynomial propagate_sorted_omp(const Circuit& circuit, const PauliPolynomial& a,
-                                     int n_threads = 1, int maxdegree = 128,
-                                     ff_float mincoeff = 0) {
-    if (n_threads <= 1) return propagate_sorted(circuit, a, maxdegree, mincoeff);
+                                     int n_threads = 1, int maxdegree = 128, ff_float mincoeff = 0,
+                                     int topk = 0) {
+    if (n_threads <= 1) return propagate_sorted(circuit, a, maxdegree, mincoeff, topk);
 
 #ifdef FF_OPENMP
     SortedPauliPoly obs = SortedPauliPoly::from_poly(a);
@@ -370,6 +398,7 @@ PauliPolynomial propagate_sorted_omp(const Circuit& circuit, const PauliPolynomi
             obs = sorted_conjugate_omp(obs, gate.ps, gate.theta, maxdegree, n_threads);
 
             if (mincoeff > 0) obs = sorted_truncate(obs, mincoeff);
+            if (topk > 0) obs = sorted_truncate_top_k(obs, topk);
         }
     }
     if (pending_clifford) {
@@ -379,7 +408,7 @@ PauliPolynomial propagate_sorted_omp(const Circuit& circuit, const PauliPolynomi
     }
     return obs.to_poly();
 #else
-    return propagate_sorted(circuit, a, maxdegree, mincoeff);
+    return propagate_sorted(circuit, a, maxdegree, mincoeff, topk);
 #endif
 }
 

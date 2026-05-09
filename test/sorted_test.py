@@ -95,6 +95,47 @@ def test_clifford_only():
     assert_equal([ff.H(0), ff.CNOT(0, 1)], 1, "ZI")
 
 
+# -- top-K truncation ----------------------------------------------------------
+
+
+def test_topk_serial():
+    """Top-K via propagate (hash map) should keep at most K terms."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    ref = ff.propagate(full, obs)
+    topk_result = ff.propagate(full, obs, topk=10)
+    assert len(topk_result.terms) <= 10
+    assert len(topk_result.terms) < len(ref.terms)
+
+
+def test_topk_sorted():
+    """Top-K via propagate_sorted should match hash-map top-K."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    ref = ff.propagate(full, obs, topk=20)
+    srt = ff.propagate_sorted(full, obs, topk=20)
+    # Both should have at most 20 terms
+    assert len(ref.terms) <= 20
+    assert len(srt.terms) <= 20
+
+
+def test_topk_sorted_omp():
+    """Top-K via propagate_sorted_omp should produce at most K terms."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    result = ff.propagate_sorted_omp(full, obs, n_threads=4, topk=15)
+    assert len(result.terms) <= 15
+
+
+def test_topk_zero_is_noop():
+    """topk=0 should not truncate."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    ref = ff.propagate(full, obs)
+    topk0 = ff.propagate(full, obs, topk=0)
+    assert len(ref.terms) == len(topk0.terms)
+
+
 # -- parallel sorted agreement -------------------------------------------------
 
 
