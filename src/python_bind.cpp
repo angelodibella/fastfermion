@@ -397,90 +397,77 @@ void add_pauli_propagation(py::module_& m) {
         "propagate",
         [](const pauli_gates::Circuit& circuit,
            const std::variant<PauliString, PauliPolynomial>& observable,
-           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff) {
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk) {
             int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
             ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
             if (observable.index() == 0) {
-                // PauliString
                 return pauli_gates::propagate(circuit, PauliPolynomial(std::get<0>(observable)),
-                                              _maxdegree, _mincoeff);
+                                              _maxdegree, _mincoeff, topk);
             } else {
-                // PauliPolynomial
                 return pauli_gates::propagate(circuit, std::get<1>(observable), _maxdegree,
-                                              _mincoeff);
+                                              _mincoeff, topk);
             }
         },
         py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(),
-        py::arg("mincoeff") = py::none(),
+        py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         R"DOC(
         Backpropagates a polynomial through a circuit.
-        If maxdegree is specified, truncates any term of degree larger than maxdegree.
-        Note: the truncation only happens after applying non-Clifford gates (i.e., ROT gates).
-        So the output of propagate may have degree larger than maxdegree.
-
-        Examples:
-        >>> from fastfermion import H, CNOT, propagate
-        >>> circuit = [H(0),CNOT(0,1)]
-        >>> observable = PauliString("XZ")
-        >>> result = propagate(circuit,observable,maxdegree=3,mincoeff=1e-8)
+        Truncation options: maxdegree (weight cutoff), mincoeff (threshold), topk (keep K largest).
         )DOC");
 
     m.def(
         "propagate_omp",
         [](const pauli_gates::Circuit& circuit,
            const std::variant<PauliString, PauliPolynomial>& observable, int n_threads,
-           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff) {
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk) {
             int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
             ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
             PauliPolynomial obs = (observable.index() == 0)
                                       ? PauliPolynomial(std::get<0>(observable))
                                       : std::get<1>(observable);
-            return pauli_gates::propagate_omp(circuit, obs, n_threads, _maxdegree, _mincoeff);
+            return pauli_gates::propagate_omp(circuit, obs, n_threads, _maxdegree, _mincoeff, topk);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
-        py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
+        py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         R"DOC(
         OpenMP-parallel Pauli propagation. Falls back to serial when n_threads=1.
-        Same interface as propagate(), with an additional n_threads parameter.
         )DOC");
 
     m.def(
         "propagate_sorted",
         [](const pauli_gates::Circuit& circuit,
            const std::variant<PauliString, PauliPolynomial>& observable,
-           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff) {
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk) {
             int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
             ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
             PauliPolynomial obs = (observable.index() == 0)
                                       ? PauliPolynomial(std::get<0>(observable))
                                       : std::get<1>(observable);
-            return propagate_sorted(circuit, obs, _maxdegree, _mincoeff);
+            return propagate_sorted(circuit, obs, _maxdegree, _mincoeff, topk);
         },
-        py::arg("circuit"), py::arg("observable"),
-        py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
+        py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(),
+        py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         R"DOC(
         Sorted-array Pauli propagation. Same interface as propagate().
-        Uses sorted arrays instead of a hash map for the merge step.
         )DOC");
 
     m.def(
         "propagate_sorted_omp",
         [](const pauli_gates::Circuit& circuit,
-           const std::variant<PauliString, PauliPolynomial>& observable,
-           int n_threads,
-           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff) {
+           const std::variant<PauliString, PauliPolynomial>& observable, int n_threads,
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk) {
             int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
             ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
             PauliPolynomial obs = (observable.index() == 0)
                                       ? PauliPolynomial(std::get<0>(observable))
                                       : std::get<1>(observable);
-            return pauli_gates::propagate_sorted_omp(circuit, obs, n_threads, _maxdegree, _mincoeff);
+            return pauli_gates::propagate_sorted_omp(circuit, obs, n_threads, _maxdegree, _mincoeff,
+                                                     topk);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
-        py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
+        py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         R"DOC(
         OpenMP-parallel sorted-array Pauli propagation.
-        Combines sorted-array merge with parallel emission and parallel merge.
         Falls back to serial sorted path when n_threads=1.
         )DOC");
 }

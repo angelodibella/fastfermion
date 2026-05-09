@@ -15,9 +15,9 @@ namespace fastfermion {
 namespace pauli_gates {
 
 PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, int n_threads = 1,
-                              const int& maxdegree = 128, const ff_float& mincoeff = 0) {
-    // Fall back to serial if no OpenMP or single-threaded
-    if (n_threads <= 1) return propagate(circuit, a, maxdegree, mincoeff);
+                              const int& maxdegree = 128, const ff_float& mincoeff = 0,
+                              const int topk = 0) {
+    if (n_threads <= 1) return propagate(circuit, a, maxdegree, mincoeff, topk);
 
 #ifdef FF_OPENMP
     PauliPolynomial obs(a);
@@ -94,6 +94,7 @@ PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, 
                 std::erase_if(obs.terms, [&mincoeff](const auto& term) {
                     return std::abs(term.second) <= mincoeff;
                 });
+            if (topk > 0) truncate_top_k(obs, topk);
         }
     }
     if (pending_clifford) {
@@ -103,7 +104,7 @@ PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, 
 
 #else
     // OpenMP not available at compile time
-    return propagate(circuit, a, maxdegree, mincoeff);
+    return propagate(circuit, a, maxdegree, mincoeff, topk);
 #endif
 }
 

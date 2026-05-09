@@ -33,3 +33,17 @@ To eliminate the hash-map bottleneck, replace it with a sorted-array representat
 **Why this is faster:** every step is a sequential scan over contiguous memory. No hash lookups, no random access. The dominant cost is the sort in step 2, which at K_m = 10^6 takes ~0.05s (vs ~0.1s for the hash-map rebuild, which also cannot be parallelised).
 
 **Implementation plan:** define `SortedPauliPoly` (parallel sorted arrays), implement `from_poly`/`to_poly` (convert to/from hash map), `sorted_merge` (two-pointer merge), `sorted_conjugate` (steps 1-3 above). Serial first, then add OpenMP to emit and merge.
+
+## 2026-05-09: Sorted-array implementation (serial + parallel)
+
+Implemented in `src/pauli_sorted.h`:
+
+- `SortedPauliPoly`: parallel sorted arrays (`keys[]`, `coeffs[]`) with `from_poly`/`to_poly` conversion and a static `merge` (two-pointer sweep summing on key collision).
+- `sorted_conjugate`: serial emit → sort partners → merge. The kept stream preserves input order; the partner stream (XORed keys) is sorted separately then merged.
+- `sorted_conjugate_omp`: parallel emit (thread-local buffers, same pattern as `propagate_omp`), serial sort (TODO: parallel sort), parallel merge via `sorted_merge_omp` (splits both arrays into aligned chunks via binary search, merges each chunk on a separate thread, concatenates).
+- `sorted_truncate`: single-pass threshold filter preserving sorted order.
+- `propagate_sorted` / `propagate_sorted_omp`: full propagation loops using the sorted path, with Clifford batching fallback to hash map. Exposed to Python.
+
+**Tests:** 20 tests (10 serial sorted + 10 parallel sorted), all passing. Total: 71 ff tests + 42 majorana = 113.
+
+**Current state:** four propagation backends available (`propagate`, `propagate_omp`, `propagate_sorted`, `propagate_sorted_omp`). Next step: CPU benchmarking to determine crossover points and whether the sorted parallel path actually outperforms serial at realistic K_m.

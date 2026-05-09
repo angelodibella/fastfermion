@@ -62,8 +62,31 @@ void _apply_clifford_circuit(PauliPolynomial& obs, const Circuit& circuit, int b
     obs.terms.swap(result.terms);
 }
 
+// Top-K truncation: keep only the K entries with largest |coefficient|.
+void truncate_top_k(PauliPolynomial& p, int k) {
+    if (k <= 0 || (int)p.terms.size() <= k) return;
+    // Find the K-th largest magnitude via nth_element on a vector of magnitudes
+    std::vector<ff_float> mags;
+    mags.reserve(p.terms.size());
+    for (const auto& [_, c] : p.terms) mags.push_back(std::abs(c));
+    std::nth_element(mags.begin(), mags.begin() + k, mags.end(), std::greater<ff_float>());
+    ff_float cutoff = mags[k];  // everything strictly below this is discarded
+    std::erase_if(p.terms, [cutoff](const auto& term) { return std::abs(term.second) < cutoff; });
+    // If ties at the boundary kept too many, trim arbitrarily
+    while ((int)p.terms.size() > k) {
+        auto it = p.terms.begin();
+        // Find an entry at exactly the cutoff magnitude
+        while (it != p.terms.end() && std::abs(it->second) > cutoff) ++it;
+        if (it != p.terms.end())
+            p.terms.erase(it);
+        else
+            break;
+    }
+}
+
 PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a,
-                          const int& maxdegree = 128, const ff_float& mincoeff = 0) {
+                          const int& maxdegree = 128, const ff_float& mincoeff = 0,
+                          const int topk = 0) {
     PauliPolynomial obs(a);
     int clifford_begin;
     bool pending_clifford_operations = false;
@@ -116,6 +139,7 @@ PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a,
                     return std::abs(term.second) <= mincoeff;
                 });
             }
+            if (topk > 0) truncate_top_k(obs, topk);
         }
     }
     if (pending_clifford_operations) {
