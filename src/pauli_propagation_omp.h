@@ -1,6 +1,5 @@
-// src/pauli_propagation_omp.h
-// OpenMP-parallel Pauli propagation. Falls back to serial when FF_OPENMP is
-// not defined or n_threads == 1.
+// OpenMP-parallel Pauli propagation (hash-map backend).
+// Falls back to serial when FF_OPENMP is not defined or n_threads == 1.
 
 #pragma once
 
@@ -16,13 +15,15 @@ namespace pauli_gates {
 
 PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, int n_threads = 1,
                               const int& maxdegree = 128, const ff_float& mincoeff = 0,
-                              const int topk = 0) {
-    if (n_threads <= 1) return propagate(circuit, a, maxdegree, mincoeff, topk);
+                              const int topk = 0, const int max_xweight = -1,
+                              const int xtrunc_period = 1) {
+    if (n_threads <= 1) return propagate(circuit, a, maxdegree, mincoeff, topk, max_xweight, xtrunc_period);
 
 #ifdef FF_OPENMP
     PauliPolynomial obs(a);
     int clifford_begin;
     bool pending_clifford = false;
+    int rot_count = 0;
 
     // Parallel data structure must be indexable; also, multiple
     // threads editing the same hash map may lead to a race condition
@@ -95,6 +96,9 @@ PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, 
                     return std::abs(term.second) <= mincoeff;
                 });
             if (topk > 0) truncate_top_k(obs, topk);
+            rot_count++;
+            if (max_xweight >= 0 && xtrunc_period > 0 && rot_count % xtrunc_period == 0)
+                truncate_x_weight(obs, max_xweight);
         }
     }
     if (pending_clifford) {
@@ -103,8 +107,7 @@ PauliPolynomial propagate_omp(const Circuit& circuit, const PauliPolynomial& a, 
     return obs;
 
 #else
-    // OpenMP not available at compile time
-    return propagate(circuit, a, maxdegree, mincoeff, topk);
+    return propagate(circuit, a, maxdegree, mincoeff, topk, max_xweight, xtrunc_period);
 #endif
 }
 

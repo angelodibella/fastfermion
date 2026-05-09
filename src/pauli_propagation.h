@@ -4,10 +4,7 @@
     by a license that can be found in the LICENSE file.
 */
 
-// Heisenberg-picture backpropagation of Pauli observables through quantum
-// circuits (Sparse Pauli Dynamics). Observables are propagated in reverse
-// through Clifford gates and Pauli rotations, accumulating terms in a
-// PauliPolynomial.
+// Heisenberg-picture Pauli propagation (Sparse Pauli Dynamics).
 
 #pragma once
 
@@ -62,20 +59,26 @@ void _apply_clifford_circuit(PauliPolynomial& obs, const Circuit& circuit, int b
     obs.terms.swap(result.terms);
 }
 
+// X-truncation (xSPD): discard strings with more than max_xweight X/Y factors.
+void truncate_x_weight(PauliPolynomial& p, int max_xweight) {
+    if (max_xweight < 0) return;
+    std::erase_if(p.terms, [max_xweight](const auto& term) {
+        return term.first.degree_x() + term.first.degree_y() > max_xweight;
+    });
+}
+
 // Top-K truncation: keep only the K entries with largest |coefficient|.
 void truncate_top_k(PauliPolynomial& p, int k) {
     if (k <= 0 || (int)p.terms.size() <= k) return;
-    // Find the K-th largest magnitude via nth_element on a vector of magnitudes
     std::vector<ff_float> mags;
     mags.reserve(p.terms.size());
     for (const auto& [_, c] : p.terms) mags.push_back(std::abs(c));
     std::nth_element(mags.begin(), mags.begin() + k, mags.end(), std::greater<ff_float>());
-    ff_float cutoff = mags[k];  // everything strictly below this is discarded
+    ff_float cutoff = mags[k];
     std::erase_if(p.terms, [cutoff](const auto& term) { return std::abs(term.second) < cutoff; });
-    // If ties at the boundary kept too many, trim arbitrarily
+    // Trim ties at the boundary
     while ((int)p.terms.size() > k) {
         auto it = p.terms.begin();
-        // Find an entry at exactly the cutoff magnitude
         while (it != p.terms.end() && std::abs(it->second) > cutoff) ++it;
         if (it != p.terms.end())
             p.terms.erase(it);
@@ -86,30 +89,29 @@ void truncate_top_k(PauliPolynomial& p, int k) {
 
 PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a,
                           const int& maxdegree = 128, const ff_float& mincoeff = 0,
-                          const int topk = 0) {
+                          const int topk = 0, const int max_xweight = -1,
+                          const int xtrunc_period = 1) {
     PauliPolynomial obs(a);
     int clifford_begin;
     bool pending_clifford_operations = false;
+    int rot_count = 0;
     for (int i = circuit.size() - 1; i >= 0; i--) {
         if (circuit[i].index() == 0) {
-            // Clifford gate -- batch consecutive Cliffords
+            // Clifford gate — batch
             if (!pending_clifford_operations) {
                 clifford_begin = i;
                 pending_clifford_operations = true;
             }
         } else if (circuit[i].index() == 1) {
-            // Flush any batched Clifford gates before the rotation
+            // Flush batched Cliffords
             if (pending_clifford_operations) {
                 _apply_clifford_circuit(obs, circuit, i + 1, clifford_begin + 1);
                 pending_clifford_operations = false;
             }
 
-            // Apply Pauli rotation gate
             const ROT& gate = std::get<ROT>(circuit[i]);
 
-            // Conjugation rule for Pauli rotations:
-            //   ROT_{P,t}(Q) = Q                             if [P, Q] = 0
-            //                = cos(t)*Q + i*sin(t)*P*Q       otherwise
+            // Q -> Q if [P,Q]=0, else cos(t)Q + i sin(t) PQ
 
             std::vector<std::pair<PauliString, ff_complex>> new_terms;
             new_terms.reserve(obs.terms.size());
@@ -140,6 +142,9 @@ PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a,
                 });
             }
             if (topk > 0) truncate_top_k(obs, topk);
+            rot_count++;
+            if (max_xweight >= 0 && xtrunc_period > 0 && rot_count % xtrunc_period == 0)
+                truncate_x_weight(obs, max_xweight);
         }
     }
     if (pending_clifford_operations) {

@@ -136,6 +136,45 @@ def test_topk_zero_is_noop():
     assert len(ref.terms) == len(topk0.terms)
 
 
+# -- X-truncation (xSPD) -------------------------------------------------------
+
+
+def test_xtrunc_reduces_terms():
+    """X-truncation should reduce term count."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    ref = ff.propagate(full, obs)
+    xtrunc = ff.propagate(full, obs, max_xweight=2)
+    assert len(xtrunc.terms) < len(ref.terms)
+
+
+def test_xtrunc_sorted():
+    """X-truncation via sorted path should also reduce terms."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    ref = ff.propagate_sorted(full, obs)
+    xtrunc = ff.propagate_sorted(full, obs, max_xweight=2)
+    assert len(xtrunc.terms) < len(ref.terms)
+
+
+def test_xtrunc_disabled_by_default():
+    """max_xweight=-1 should not truncate."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    ref = ff.propagate(full, obs)
+    no_xtrunc = ff.propagate(full, obs, max_xweight=-1)
+    assert len(ref.terms) == len(no_xtrunc.terms)
+
+
+def test_xtrunc_period():
+    """Applying X-truncation less frequently should keep more terms."""
+    obs = ff.PauliString("Z" + "I" * 5)
+    full = tfim(6, 0.1) * 5
+    every1 = ff.propagate(full, obs, max_xweight=2, xtrunc_period=1)
+    every5 = ff.propagate(full, obs, max_xweight=2, xtrunc_period=5)
+    assert len(every5.terms) >= len(every1.terms)
+
+
 # -- parallel sorted agreement -------------------------------------------------
 
 
