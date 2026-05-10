@@ -3,6 +3,9 @@
 
 #pragma once
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <vector>
 
@@ -15,6 +18,116 @@
 #endif
 
 namespace fastfermion {
+
+// ---------------------------------------------------------------------------
+// LSD radix sort for PauliString keys + associated coefficients.
+//
+// PauliString comparison is lexicographic on the tuple
+//   (support, yorz, xory)  where  support = xory | yorz,
+// and each component is a BitSet<SYS_NUM_ULONG> (array of uint64_t words,
+// compared MSW-first).  The sort key is therefore a sequence of
+// 3 * SYS_NUM_ULONG uint64_t words, ordered from most significant to least:
+//   support[N-1], ..., support[0], yorz[N-1], ..., yorz[0], xory[N-1], ..., xory[0].
+//
+// LSD radix sort processes bytes from least significant to most significant.
+// Each pass is a stable counting sort on one byte (256 buckets).
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+constexpr int RADIX = 256;
+constexpr int N_WORDS = SYS_NUM_ULONG;
+// 3 components (support, yorz, xory) × N_WORDS words × 8 bytes/word
+constexpr int SORT_KEY_BYTES = 3 * N_WORDS * 8;
+
+// Extract the sort key word at position `word_idx` (0 = least significant).
+// Word layout (LSW to MSW):
+//   0..N-1     : xory.words[0..N-1]
+//   N..2N-1    : yorz.words[0..N-1]
+//   2N..3N-1   : support.words[0..N-1]
+inline std::uint64_t sort_key_word(const PauliString& ps, int word_idx) {
+    if (word_idx < N_WORDS)
+        return ps.xory.words[word_idx];
+    else if (word_idx < 2 * N_WORDS)
+        return ps.yorz.words[word_idx - N_WORDS];
+    else
+        return (ps.xory | ps.yorz).words[word_idx - 2 * N_WORDS];
+}
+
+// Extract byte `byte_idx` (0 = least significant byte of LSW) from a sort key.
+inline std::uint8_t sort_key_byte(const PauliString& ps, int byte_idx) {
+    int word = byte_idx / 8;
+    int shift = (byte_idx % 8) * 8;
+    return static_cast<std::uint8_t>(sort_key_word(ps, word) >> shift);
+}
+
+// Check whether byte position `byte_idx` is all-zero across the array.
+inline bool byte_is_zero(const PauliString* keys, size_t n, int byte_idx) {
+    for (size_t i = 0; i < n; i++)
+        if (sort_key_byte(keys[i], byte_idx) != 0) return false;
+    return true;
+}
+
+}  // namespace detail
+
+// Sort parallel (keys, coeffs) arrays in-place using LSD radix sort,
+// producing the same ordering as std::sort with PauliString::operator<.
+// Requires scratch buffers of the same size; caller may supply them
+// to amortise allocation across gates.
+inline void radix_sort_pauli(std::vector<PauliString>& keys,
+                             std::vector<ff_complex>& coeffs,
+                             std::vector<PauliString>& keys_buf,
+                             std::vector<ff_complex>& coeffs_buf) {
+    const size_t n = keys.size();
+    if (n <= 1) return;
+
+    keys_buf.resize(n);
+    coeffs_buf.resize(n);
+
+    PauliString* src_k = keys.data();
+    ff_complex*  src_c = coeffs.data();
+    PauliString* dst_k = keys_buf.data();
+    ff_complex*  dst_c = coeffs_buf.data();
+
+    int passes = 0;
+    for (int b = 0; b < detail::SORT_KEY_BYTES; b++) {
+        if (detail::byte_is_zero(src_k, n, b)) continue;
+
+        size_t counts[detail::RADIX] = {};
+        for (size_t i = 0; i < n; i++)
+            counts[detail::sort_key_byte(src_k[i], b)]++;
+
+        size_t offsets[detail::RADIX];
+        offsets[0] = 0;
+        for (int r = 1; r < detail::RADIX; r++)
+            offsets[r] = offsets[r - 1] + counts[r - 1];
+
+        for (size_t i = 0; i < n; i++) {
+            std::uint8_t digit = detail::sort_key_byte(src_k[i], b);
+            dst_k[offsets[digit]] = src_k[i];
+            dst_c[offsets[digit]] = src_c[i];
+            offsets[digit]++;
+        }
+
+        std::swap(src_k, dst_k);
+        std::swap(src_c, dst_c);
+        passes++;
+    }
+
+    // If odd number of passes, result is in the buffer; copy back.
+    if (passes % 2 != 0) {
+        std::memcpy(keys.data(), keys_buf.data(), n * sizeof(PauliString));
+        std::memcpy(coeffs.data(), coeffs_buf.data(), n * sizeof(ff_complex));
+    }
+}
+
+// Convenience overload that allocates its own scratch buffers.
+inline void radix_sort_pauli(std::vector<PauliString>& keys,
+                             std::vector<ff_complex>& coeffs) {
+    std::vector<PauliString> kb;
+    std::vector<ff_complex> cb;
+    radix_sort_pauli(keys, coeffs, kb, cb);
+}
 
 // Sorted parallel arrays (keys, coeffs), no duplicate keys.
 struct SortedPauliPoly {
@@ -73,19 +186,19 @@ struct SortedPauliPoly {
     }
 };
 
-// Conjugate sorted polynomial by exp(-i t/2 P).
-// Commuting terms pass through; anticommuting terms split and are re-sorted.
-SortedPauliPoly sorted_conjugate(const SortedPauliPoly& in, const PauliString& ps, ff_float theta,
-                                 int maxdegree) {
-    const ff_float cos_t = cos(theta);
-    const ff_complex isin_t = ff_complex(0, sin(theta));
-
-    // Emit kept (sorted) and partners (unsorted)
-    SortedPauliPoly kept;
-    std::vector<std::pair<PauliString, ff_complex>> partner_pairs;
+// Emit kept (sorted) and partner (unsorted) streams from a single gate.
+// Factored out so both comparison-sort and radix-sort paths can share it.
+inline void emit_kept_partners(const SortedPauliPoly& in, const PauliString& ps,
+                               ff_float cos_t, ff_complex isin_t, int maxdegree,
+                               SortedPauliPoly& kept, SortedPauliPoly& partners) {
+    kept.keys.clear();
+    kept.coeffs.clear();
+    partners.keys.clear();
+    partners.coeffs.clear();
     kept.keys.reserve(in.size());
     kept.coeffs.reserve(in.size());
-    partner_pairs.reserve(in.size());
+    partners.keys.reserve(in.size());
+    partners.coeffs.reserve(in.size());
 
     for (size_t i = 0; i < in.size(); i++) {
         const PauliString& q = in.keys[i];
@@ -99,24 +212,54 @@ SortedPauliPoly sorted_conjugate(const SortedPauliPoly& in, const PauliString& p
             kept.coeffs.push_back(c * cos_t);
 
             PauliMonomial pq = ps * q;
-            if (pq.degree_total() <= maxdegree)
-                partner_pairs.emplace_back(pq.pauli_string(), c * isin_t * pq.coefficient());
+            if (pq.degree_total() <= maxdegree) {
+                partners.keys.push_back(pq.pauli_string());
+                partners.coeffs.push_back(c * isin_t * pq.coefficient());
+            }
         }
     }
+}
 
-    // Sort partners by key
-    std::sort(partner_pairs.begin(), partner_pairs.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+// Conjugate sorted polynomial by exp(-i t/2 P) using comparison sort.
+SortedPauliPoly sorted_conjugate(const SortedPauliPoly& in, const PauliString& ps, ff_float theta,
+                                 int maxdegree) {
+    const ff_float cos_t = cos(theta);
+    const ff_complex isin_t = ff_complex(0, sin(theta));
 
-    SortedPauliPoly partners;
-    partners.keys.reserve(partner_pairs.size());
-    partners.coeffs.reserve(partner_pairs.size());
-    for (const auto& [k, c] : partner_pairs) {
-        partners.keys.push_back(k);
-        partners.coeffs.push_back(c);
+    SortedPauliPoly kept, partners;
+    emit_kept_partners(in, ps, cos_t, isin_t, maxdegree, kept, partners);
+
+    // Sort partners by key (comparison sort: O(K_a log K_a))
+    std::vector<size_t> idx(partners.size());
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(),
+              [&](size_t a, size_t b) { return partners.keys[a] < partners.keys[b]; });
+
+    SortedPauliPoly sorted_partners;
+    sorted_partners.keys.reserve(partners.size());
+    sorted_partners.coeffs.reserve(partners.size());
+    for (size_t i : idx) {
+        sorted_partners.keys.push_back(partners.keys[i]);
+        sorted_partners.coeffs.push_back(partners.coeffs[i]);
     }
 
-    // Step 3: merge the two sorted streams
+    return SortedPauliPoly::merge(kept, sorted_partners);
+}
+
+// Conjugate sorted polynomial by exp(-i t/2 P) using radix sort.
+SortedPauliPoly sorted_conjugate_radix(const SortedPauliPoly& in, const PauliString& ps,
+                                       ff_float theta, int maxdegree,
+                                       std::vector<PauliString>& keys_buf,
+                                       std::vector<ff_complex>& coeffs_buf) {
+    const ff_float cos_t = cos(theta);
+    const ff_complex isin_t = ff_complex(0, sin(theta));
+
+    SortedPauliPoly kept, partners;
+    emit_kept_partners(in, ps, cos_t, isin_t, maxdegree, kept, partners);
+
+    // Sort partners by key (radix sort: O(K_a))
+    radix_sort_pauli(partners.keys, partners.coeffs, keys_buf, coeffs_buf);
+
     return SortedPauliPoly::merge(kept, partners);
 }
 
@@ -335,7 +478,54 @@ SortedPauliPoly sorted_truncate(const SortedPauliPoly& in, ff_float mincoeff) {
 
 namespace pauli_gates {
 
-// Serial propagation using sorted arrays.
+// Serial propagation using sorted arrays with radix sort.
+PauliPolynomial propagate_sorted_radix(const Circuit& circuit, const PauliPolynomial& a,
+                                       int maxdegree = 128, ff_float mincoeff = 0, int topk = 0,
+                                       int max_xweight = -1, int xtrunc_period = 1) {
+    SortedPauliPoly obs = SortedPauliPoly::from_poly(a);
+
+    int clifford_begin;
+    bool pending_clifford = false;
+    int rot_count = 0;
+    PauliPolynomial obs_hm;
+
+    // Scratch buffers reused across gates
+    std::vector<PauliString> keys_buf;
+    std::vector<ff_complex> coeffs_buf;
+
+    for (int i = circuit.size() - 1; i >= 0; i--) {
+        if (circuit[i].index() == 0) {
+            if (!pending_clifford) {
+                clifford_begin = i;
+                pending_clifford = true;
+            }
+        } else if (circuit[i].index() == 1) {
+            if (pending_clifford) {
+                obs_hm = obs.to_poly();
+                _apply_clifford_circuit(obs_hm, circuit, i + 1, clifford_begin + 1);
+                obs = SortedPauliPoly::from_poly(obs_hm);
+                pending_clifford = false;
+            }
+
+            const ROT& gate = std::get<ROT>(circuit[i]);
+            obs = sorted_conjugate_radix(obs, gate.ps, gate.theta, maxdegree, keys_buf, coeffs_buf);
+
+            if (mincoeff > 0) obs = sorted_truncate(obs, mincoeff);
+            if (topk > 0) obs = sorted_truncate_top_k(obs, topk);
+            rot_count++;
+            if (max_xweight >= 0 && xtrunc_period > 0 && rot_count % xtrunc_period == 0)
+                obs = sorted_truncate_x_weight(obs, max_xweight);
+        }
+    }
+    if (pending_clifford) {
+        obs_hm = obs.to_poly();
+        _apply_clifford_circuit(obs_hm, circuit, 0, clifford_begin + 1);
+        return obs_hm;
+    }
+    return obs.to_poly();
+}
+
+// Serial propagation using sorted arrays (comparison sort).
 PauliPolynomial propagate_sorted(const Circuit& circuit, const PauliPolynomial& a,
                                  int maxdegree = 128, ff_float mincoeff = 0, int topk = 0,
                                  int max_xweight = -1, int xtrunc_period = 1) {
