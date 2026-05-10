@@ -458,7 +458,28 @@ void add_pauli_propagation(py::module_& m) {
         py::arg("mincoeff") = py::none(), py::arg("topk") = 0, py::arg("max_xweight") = -1,
         py::arg("xtrunc_period") = 1,
         R"DOC(
-        Sorted-array Pauli propagation. Same interface as propagate().
+        Sorted-array Pauli propagation (comparison sort). Same interface as propagate().
+        )DOC");
+
+    m.def(
+        "propagate_sorted_radix",
+        [](const pauli_gates::Circuit& circuit,
+           const std::variant<PauliString, PauliPolynomial>& observable,
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
+           int max_xweight, int xtrunc_period) {
+            int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
+            ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
+            PauliPolynomial obs = (observable.index() == 0)
+                                      ? PauliPolynomial(std::get<0>(observable))
+                                      : std::get<1>(observable);
+            return pauli_gates::propagate_sorted_radix(circuit, obs, _maxdegree, _mincoeff, topk,
+                                                       max_xweight, xtrunc_period);
+        },
+        py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(),
+        py::arg("mincoeff") = py::none(), py::arg("topk") = 0, py::arg("max_xweight") = -1,
+        py::arg("xtrunc_period") = 1,
+        R"DOC(
+        Sorted-array Pauli propagation (radix sort). Same interface as propagate().
         )DOC");
 
     m.def(
