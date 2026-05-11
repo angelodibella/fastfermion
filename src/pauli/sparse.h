@@ -11,7 +11,7 @@
 
 #include "bits_utils.h"  // for next_combination
 #include "matrix.h"      // for CSCMatrix
-#include "pauli_algebra.h"
+#include "pauli/algebra.h"
 #include "subspaces.h"
 
 namespace fastfermion {
@@ -149,5 +149,6 @@ CSCMatrix<ff_complex> PauliMonomial::sparse(int n) const {
 CSCMatrix<ff_complex> PauliMonomial::sparse(int n, int nup) const {
     return PauliPolynomial(*this).sparse(n, nup);
 }
+
 
 }  // namespace fastfermion

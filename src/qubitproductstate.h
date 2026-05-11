@@ -8,7 +8,7 @@
 
 #include "bits_utils.h"
 #include "common.h"
-#include "pauli_algebra.h"
+#include "pauli/algebra.h"
 #include "subspaces.h"
 
 namespace fastfermion {
