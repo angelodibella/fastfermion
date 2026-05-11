@@ -150,5 +150,4 @@ CSCMatrix<ff_complex> PauliMonomial::sparse(int n, int nup) const {
     return PauliPolynomial(*this).sparse(n, nup);
 }
 
-
 }  // namespace fastfermion
