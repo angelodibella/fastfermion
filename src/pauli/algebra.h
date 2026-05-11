@@ -19,7 +19,6 @@
 
 namespace fastfermion {
 
-
 // Forward declaration of main structs defined in this file
 struct PauliString;
 struct PauliMonomial;
