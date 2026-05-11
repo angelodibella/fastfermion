@@ -1,6 +1,6 @@
 """Tests for gate-batched Pauli propagation.
 
-Verifies propagate_batched matches serial propagate.
+Verifies propagate(batched=True) matches propagate(batched=False).
 """
 
 import pytest
@@ -8,19 +8,19 @@ import fastfermion as ff
 
 
 def assert_equal(circuit, n_steps, obs_str, **kwargs):
-    """Assert batched propagation matches serial."""
+    """Assert batched and unbatched propagation agree (no truncation)."""
     obs = ff.PauliString(obs_str)
     full = circuit * n_steps
-    ref = ff.propagate(full, obs, **kwargs)
-    bat = ff.propagate_batched(full, obs, **kwargs)
+    ref = ff.propagate(full, obs, batched=False, **kwargs)
+    bat = ff.propagate(full, obs, batched=True, **kwargs)
 
     assert abs(ref.overlapwithzero() - bat.overlapwithzero()) < 1e-12, \
-        f"expectation mismatch: serial={ref.overlapwithzero()}, batched={bat.overlapwithzero()}"
+        f"expectation mismatch: unbatched={ref.overlapwithzero()}, batched={bat.overlapwithzero()}"
     assert len(ref.terms) == len(bat.terms), \
-        f"term count mismatch: serial={len(ref.terms)}, batched={len(bat.terms)}"
+        f"term count mismatch: unbatched={len(ref.terms)}, batched={len(bat.terms)}"
     for ps, c in ref.terms.items():
         assert abs(c - bat.terms.get(ps, 0)) < 1e-12, \
-            f"coefficient mismatch at {ps}: serial={c}, batched={bat.terms.get(ps, 0)}"
+            f"coefficient mismatch at {ps}: unbatched={c}, batched={bat.terms.get(ps, 0)}"
 
 
 def tfim(n, dt):
@@ -47,12 +47,12 @@ def test_tfim():
     assert_equal(tfim(6, 0.1), 5, "Z" + "I" * 5)
 
 def test_tfim_threshold():
-    """Batched truncation schedule differs from serial (once per batch vs per gate).
+    """Batched truncation schedule differs from per-gate (once per batch vs per gate).
     Expectation values should agree within truncation error."""
     obs = ff.PauliString("Z" + "I" * 5)
     full = tfim(6, 0.1) * 5
-    ref = ff.propagate(full, obs, mincoeff=1e-3)
-    bat = ff.propagate_batched(full, obs, mincoeff=1e-3)
+    ref = ff.propagate(full, obs, batched=False, mincoeff=1e-3)
+    bat = ff.propagate(full, obs, batched=True, mincoeff=1e-3)
     assert abs(ref.overlapwithzero() - bat.overlapwithzero()) < 1e-3
 
 def test_heisenberg():

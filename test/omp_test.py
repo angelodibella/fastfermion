@@ -1,7 +1,6 @@
 """Tests for OpenMP-parallel Pauli propagation.
 
-Verifies propagate_omp matches serial propagate across thread counts,
-models, and truncation settings.
+Verifies propagate(n_threads>1) matches propagate(n_threads=1).
 """
 
 import pytest
@@ -14,7 +13,7 @@ def assert_equal(circuit, n_steps, obs, n_threads, **kwargs):
         obs = ff.PauliString(obs)
     full = circuit * n_steps
     ref = ff.propagate(full, obs, **kwargs)
-    omp = ff.propagate_omp(full, obs, n_threads=n_threads, **kwargs)
+    omp = ff.propagate(full, obs, n_threads=n_threads, **kwargs)
     assert abs(ref.overlapwithzero() - omp.overlapwithzero()) < 1e-12
     assert len(ref.terms) == len(omp.terms)
     for ps, c in ref.terms.items():
@@ -22,7 +21,6 @@ def assert_equal(circuit, n_steps, obs, n_threads, **kwargs):
 
 
 def tfim(n, dt):
-    """First-order TFIM step (J=h=1)."""
     g = []
     for i in range(n):
         g.append(ff.ROT("ZZ", [i, (i + 1) % n], -2 * dt))
@@ -32,7 +30,6 @@ def tfim(n, dt):
 
 
 def heisenberg(n, dt):
-    """First-order Heisenberg step (J=1)."""
     g = []
     for i in range(n):
         j = (i + 1) % n
@@ -78,7 +75,7 @@ def test_polynomial_observable():
     )
     full = tfim(4, 0.05) * 10
     ref = ff.propagate(full, obs)
-    omp = ff.propagate_omp(full, obs, n_threads=4)
+    omp = ff.propagate(full, obs, n_threads=4)
     assert abs(ref.overlapwithzero() - omp.overlapwithzero()) < 1e-12
 
 
@@ -95,7 +92,7 @@ def test_empty_circuit():
 
 def test_identity_rotation():
     obs = ff.PauliString("Z")
-    omp = ff.propagate_omp([ff.ROT("X", (0,), 0.0)] * 10, obs, n_threads=4)
+    omp = ff.propagate([ff.ROT("X", (0,), 0.0)] * 10, obs, n_threads=4)
     assert abs(omp.overlapwithzero() - 1.0) < 1e-14
 
 
