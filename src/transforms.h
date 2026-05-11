@@ -13,7 +13,7 @@
 #include "common.h"
 #include "fermi_algebra.h"
 #include "majorana_algebra.h"
-#include "pauli_algebra.h"
+#include "pauli/algebra.h"
 
 namespace fastfermion {
 

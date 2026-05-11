@@ -19,6 +19,7 @@
 
 namespace fastfermion {
 
+
 // Forward declaration of main structs defined in this file
 struct PauliString;
 struct PauliMonomial;
@@ -571,7 +572,7 @@ struct PauliPolynomial {
     CSCMatrix<ff_complex> sparse() const { return sparse(extent()); }
 };
 
-// -------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------
 
 // Product
 PauliMonomial operator*(const PauliString& a, const PauliString& b) {
@@ -871,7 +872,7 @@ bool operator==(const PauliMonomial& a, const PauliPolynomial& b) {
     return PauliPolynomial(a) == b;
 }
 
-// -------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------
 
 // Commutation
 
@@ -929,7 +930,7 @@ bool PauliPolynomial::commutes(const PauliPolynomial& b) const { return commutat
 bool PauliString::commutes(const PauliPolynomial& b) const { return commutator(b).is_zero(0); }
 bool PauliMonomial::commutes(const PauliPolynomial& b) const { return commutator(b).is_zero(0); }
 
-// -------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------
 
 // Printing
 

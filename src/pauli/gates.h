@@ -1,15 +1,12 @@
-/*
-    Copyright (c) 2025-2026 Hamza Fawzi (hamzafawzi@gmail.com)
-    All rights reserved. Use of this source code is governed
-    by a license that can be found in the LICENSE file.
-*/
-
-// Clifford gates and Pauli rotation for Heisenberg-picture propagation.
+// Clifford gates, Pauli rotation, and circuit types for Heisenberg-picture propagation.
 
 #pragma once
 
+#include <functional>
+#include <variant>
+
 #include "bits_utils.h"
-#include "pauli_algebra.h"
+#include "pauli/algebra.h"
 
 namespace fastfermion {
 
@@ -42,17 +39,6 @@ void S_impl(const int& i, PauliString& a, ff_complex& coeff) {
 
 void CNOT_impl(const int& i, const int& j, PauliString& a, ff_complex& coeff) {
     // Generating set:   XI -> XX,  ZI -> ZI,  IX -> IX,  IZ -> ZZ
-    //
-    // Other cases:
-    // IY -> ZY,  XX -> XI,  XY -> YZ,  XZ -> -YY
-    // YI -> YX,  YX -> YI,  YY -> -XZ, YZ -> XY
-    // ZX -> ZX,  ZY -> IY,  ZZ -> ZI
-
-    // out.xory[i] = in.xory[i]
-    // out.xory[j] = in.xory[i] ^ in.xory[j]
-    // out.yorz[i] = in.yorz[i] ^ in.yorz[j]
-    // out.yorz[j] = in.yorz[j]
-    // out.phase = -1 iff input is either XZ or YY
     ff_ulong mask_i = ff_ulong::singleton(i);
     ff_ulong mask_j = ff_ulong::singleton(j);
 
@@ -68,24 +54,12 @@ void CNOT_impl(const int& i, const int& j, PauliString& a, ff_complex& coeff) {
 
 void SWAP_impl(int i, int j, PauliString& a, ff_complex& coeff) {
     // XI -> IX,  ZI -> IZ,  IX -> XI,  IZ -> ZI
-    // Swap bits i and j of a.xory and a.yorz
     swap_bits_inplace(a.xory, i, j);
     swap_bits_inplace(a.yorz, i, j);
 }
 
 void CZ_impl(int i, int j, PauliString& a, ff_complex& coeff) {
     // Generating set:   XI -> XZ,  ZI -> ZI,  IX -> ZX,  IZ -> IZ
-    //
-    // Other cases:
-    // XX -> YY,  XZ -> XI,  XY -> -YX
-    // YI -> YZ,  YX -> -XY, YY -> XX,  YZ -> YI
-    // ZX -> IX,  ZY -> IY,  ZZ -> ZZ,  IY -> ZY
-
-    // out.xory[i] = in.xory[i]
-    // out.xory[j] = in.xory[j]
-    // out.yorz[i] = in.xory[j] ^ in.yorz[i]
-    // out.yorz[j] = in.xory[i] ^ in.yorz[j]
-    // coeff = (-1)^{xory[i] & xory[j] & (yorz[i] ^ yorz[j])}
     ff_ulong mask_i = ff_ulong::singleton(i);
     ff_ulong mask_j = ff_ulong::singleton(j);
 
@@ -112,7 +86,6 @@ struct H {
         return res;
     }
     PauliPolynomial aspoly() const {
-        // H = (X + Z) / sqrt(2)
         PauliPolynomial poly;
         poly.terms[PauliString(std::vector<int>{i}, std::vector<char>{'X'})] = 1 / std::sqrt(2);
         poly.terms[PauliString(std::vector<int>{i}, std::vector<char>{'Z'})] = 1 / std::sqrt(2);
@@ -139,7 +112,6 @@ struct S {
         return res;
     }
     PauliPolynomial aspoly() const {
-        // S = (1+i)/2 + (1-i)/2 Z
         PauliPolynomial poly;
         poly.terms[PauliString()] = ff_complex(.5, .5);
         poly.terms[PauliString(std::vector<int>{i}, std::vector<char>{'Z'})] = ff_complex(.5, -.5);
@@ -167,7 +139,6 @@ struct CNOT {
         return res;
     }
     PauliPolynomial aspoly() const {
-        // CNOT = I/2 + Zi/2 + Xj/2 - Zi Xj/2
         PauliPolynomial poly;
         poly.terms[PauliString()] = 0.5;
         poly.terms[PauliString(std::vector<int>{i}, std::vector<char>{'Z'})] = 0.5;
@@ -199,7 +170,6 @@ struct SWAP {
         return res;
     }
     PauliPolynomial aspoly() const {
-        // SWAP = (I + Xi Xj + Yi Yj + Zi Zj) / 2
         PauliPolynomial poly;
         poly.terms[PauliString()] = 0.5;
         poly.terms[PauliString(std::vector<int>{i, j}, std::vector<char>{'X', 'X'})] = 0.5;
@@ -231,7 +201,6 @@ struct CZ {
         return res;
     }
     PauliPolynomial aspoly() const {
-        // CZ = I/2 + Zi/2 + Zj/2 - Zi Zj/2
         PauliPolynomial poly;
         poly.terms[PauliString()] = 0.5;
         poly.terms[PauliString(std::vector<int>{i}, std::vector<char>{'Z'})] = 0.5;
@@ -256,7 +225,6 @@ struct ROT {
         return "ROT(" + ps.to_compact_string() + "," + std::to_string(theta) + ")";
     }
     PauliPolynomial aspoly() const {
-        // exp(-i theta/2 P) = cos(theta/2) - i sin(theta/2) P
         PauliPolynomial poly;
         poly.terms[PauliString()] = std::cos(theta / 2);
         poly.terms[ps] += ff_complex(0, -std::sin(theta / 2));
@@ -264,9 +232,6 @@ struct ROT {
     }
 
     PauliPolynomial operator()(const PauliPolynomial& o) const {
-        // Heisenberg-picture conjugation: U^dag o U.
-        // This is the same conjugation loop as in pauli_propagation.h
-        // (duplicated here so ROT can be used standalone).
         PauliPolynomial obs(o);
         std::vector<std::pair<PauliString, ff_complex>> new_terms;
         new_terms.reserve(o.terms.size());
@@ -288,6 +253,52 @@ struct ROT {
 
     PauliPolynomial operator()(const PauliString& o) const { return (*this)(PauliPolynomial(o)); }
 };
+
+// ------------------------------------------------------------------------------------------------
+
+// A CliffordGate is either a H, or S, CNOT, SWAP, CZ
+using CliffordGate = std::variant<H, S, CNOT, SWAP, CZ>;
+
+// A Clifford circuit is a sequence of Clifford gates
+using CliffordCircuit = std::vector<CliffordGate>;
+
+// A gate is either a CliffordGate or a Pauli Rotation
+using Gate = std::variant<CliffordGate, ROT>;
+
+// A circuit is a sequence of gates
+using Circuit = std::vector<Gate>;
+
+// ------------------------------------------------------------------------------------------------
+
+inline std::pair<PauliString, ff_complex> propagate_clifford(const CliffordCircuit& circuit,
+                                                             const PauliString& a) {
+    ff_complex coeff = 1;
+    PauliString res = a;
+    for (int i = circuit.size() - 1; i >= 0; i--) {
+        std::visit([&res, &coeff](const auto& gate) { gate.apply_inplace(res, coeff); },
+                   circuit[i]);
+    }
+    return std::make_pair(res, coeff);
+}
+
+inline void _apply_clifford_circuit(PauliPolynomial& obs, const Circuit& circuit, int begin,
+                                    int end) {
+    // TODO: avoid extracting into a temporary CliffordCircuit; propagate directly
+    CliffordCircuit cc(end - begin);
+    for (int j = begin; j < end; ++j) {
+        try {
+            cc[j - begin] = std::get<CliffordGate>(circuit[j]);
+        } catch (const std::bad_variant_access& err) {
+            throw_error("Internal error: circuit[begin:end] contains non-Clifford gates");
+        }
+    }
+    PauliPolynomial result;
+    for (const auto& [x, coeff] : obs.terms) {
+        const auto& [y, mult] = propagate_clifford(cc, x);
+        result.terms[y] += mult * coeff;
+    }
+    obs.terms.swap(result.terms);
+}
 
 }  // namespace pauli_gates
 
