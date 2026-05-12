@@ -555,7 +555,11 @@ void add_gen(py::module_& m) {
               &majoranastrings));
 }
 
+#if PYBIND11_VERSION_MAJOR > 2 || (PYBIND11_VERSION_MAJOR == 2 && PYBIND11_VERSION_MINOR >= 13)
 PYBIND11_MODULE(ffcore, m, py::mod_gil_not_used()) {
+#else
+PYBIND11_MODULE(ffcore, m) {
+#endif
     // The module name (ffcore) is given as the first macro argument (it should not be in quotes).
     // The second argument (m) defines a variable of type py::module_ which is the main interface
     // for creating bindings.
