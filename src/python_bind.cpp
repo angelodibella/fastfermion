@@ -395,11 +395,11 @@ void add_pauli_propagation(py::module_& m) {
         [](const pauli_gates::Circuit& circuit,
            const std::variant<PauliString, PauliPolynomial>& observable, int n_threads,
            const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
-           int max_xweight, int xtrunc_period, bool batched) {
+           int max_xweight, int xtrunc_period, bool batched, const std::string& parallel) {
 #ifndef FF_OPENMP
             if (n_threads > 1) {
                 PyErr_WarnEx(PyExc_RuntimeWarning,
-                    "n_threads > 1 ignored: fastfermion was built without OpenMP", 1);
+                             "n_threads > 1 ignored: fastfermion was built without OpenMP", 1);
             }
 #endif
             int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
@@ -408,16 +408,20 @@ void add_pauli_propagation(py::module_& m) {
                                       ? PauliPolynomial(std::get<0>(observable))
                                       : std::get<1>(observable);
             return pauli_gates::propagate(circuit, obs, n_threads, _maxdegree, _mincoeff, topk,
-                                          max_xweight, xtrunc_period, batched);
+                                          max_xweight, xtrunc_period, batched, parallel);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
         py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         py::arg("max_xweight") = -1, py::arg("xtrunc_period") = 1, py::arg("batched") = true,
+        py::arg("parallel") = "auto",
         R"DOC(
         Pauli propagation (Heisenberg-picture evolution through a circuit).
 
-        Uses OpenMP when n_threads > 1 and the library was built with OpenMP support;
-        otherwise serial. Gate batching is on by default.
+        parallel: "auto" (default), "serial", "omp", or "sharded".
+          - "auto": serial when n_threads=1, sharded when n_threads>1.
+          - "omp": parallel emission, serial hash-map rebuild.
+          - "sharded": sharded hash-map with all-parallel merge.
+        Gate batching is on by default.
         )DOC");
 
     m.attr("has_openmp") =
