@@ -14,18 +14,20 @@ py = import('python').find_installation(pure: false)
 
 # --- Dependencies ---
 
-# pybind11: try pkg-config/cmake first, fall back to python import
-pybind11_dep = dependency('pybind11', required: false)
-if not pybind11_dep.found()
-  pybind11_cmd = run_command(
-    py, '-c', 'import pybind11; print(pybind11.get_include())',
-    check: false,
+# pybind11: prefer pip-installed version (guaranteed ≥2.12 by pyproject.toml),
+# fall back to system pkg-config/cmake.
+pybind11_cmd = run_command(
+  py,
+  '-c', 'import pybind11; print(pybind11.get_include())',
+  check: false,
+)
+if pybind11_cmd.returncode() == 0
+  pybind11_dep = declare_dependency(
+    compile_args: ['-isystem', pybind11_cmd.stdout().strip()],
   )
-  if pybind11_cmd.returncode() == 0
-    pybind11_dep = declare_dependency(
-      compile_args: ['-isystem', pybind11_cmd.stdout().strip()],
-    )
-  else
+else
+  pybind11_dep = dependency('pybind11', required: false)
+  if not pybind11_dep.found()
     error('pybind11 not found. Install it: pip install pybind11')
   endif
 endif
