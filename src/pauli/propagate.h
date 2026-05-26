@@ -11,6 +11,7 @@
 // Gate batching is on by default.
 
 #pragma once
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,26 @@
 
 namespace fastfermion {
 namespace pauli_gates {
+
+// =========================================================================
+// Per-phase wall-time profiling (opt-in; near-zero cost when disabled).
+// Every accumulation happens in a serial region, so it is race-free.
+// =========================================================================
+struct PropProfile {
+    double snapshot = 0, emit = 0, merge = 0;
+    long long n_gates = 0;
+    bool enabled = false;
+    void reset() { snapshot = emit = merge = 0; n_gates = 0; }
+};
+inline PropProfile& prop_profile() {
+    static PropProfile p;
+    return p;
+}
+inline double prof_now() {
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 // =========================================================================
 // Per-gate conjugation: serial
@@ -57,8 +78,11 @@ inline void conjugate(PauliPolynomial& obs, const ROT& gate, int maxdegree) {
 
 inline void conjugate_omp(PauliPolynomial& obs, const ROT& gate, int maxdegree, int n_threads,
                           std::vector<std::pair<PauliString, ff_complex>>& snap) {
+    const bool prof = prop_profile().enabled;
+    double _t = prof ? prof_now() : 0.0;
     snap.clear();
     snap.insert(snap.end(), obs.terms.begin(), obs.terms.end());
+    if (prof) prop_profile().snapshot += prof_now() - _t;
 
     const PauliString& ps = gate.ps;
     const ff_float cos_t = cos(gate.theta);
@@ -68,6 +92,7 @@ inline void conjugate_omp(PauliPolynomial& obs, const ROT& gate, int maxdegree, 
     std::vector<std::vector<std::pair<PauliString, ff_complex>>> all_kept(n_threads);
     std::vector<std::vector<std::pair<PauliString, ff_complex>>> all_partners(n_threads);
 
+    _t = prof ? prof_now() : 0.0;
 #pragma omp parallel num_threads(n_threads)
     {
         int tid = omp_get_thread_num();
@@ -88,11 +113,17 @@ inline void conjugate_omp(PauliPolynomial& obs, const ROT& gate, int maxdegree, 
             }
         }
     }
+    if (prof) prop_profile().emit += prof_now() - _t;
 
+    _t = prof ? prof_now() : 0.0;
     obs.terms.clear();
     for (int t = 0; t < n_threads; t++) {
         for (const auto& [x, c] : all_kept[t]) obs.terms[x] += c;
         for (const auto& [x, c] : all_partners[t]) obs.terms[x] += c;
+    }
+    if (prof) {
+        prop_profile().merge += prof_now() - _t;
+        prop_profile().n_gates++;
     }
 }
 
@@ -126,6 +157,7 @@ inline PauliPolynomial from_sharded(const ShardedPoly& shards) {
 }
 
 inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegree, int n_threads) {
+    const bool prof = prop_profile().enabled;
     const PauliString& ps = gate.ps;
     const ff_float cos_t = cos(gate.theta);
     const ff_complex isin_t = ff_complex(0, sin(gate.theta));
@@ -133,6 +165,7 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
     // outgoing[src][dst]: partners from thread src destined for thread dst
     std::vector<std::vector<SendBuf>> outgoing(n_threads, std::vector<SendBuf>(n_threads));
 
+    double _t = prof ? prof_now() : 0.0;
 #pragma omp parallel num_threads(n_threads)
     {
         int tid = omp_get_thread_num();
@@ -159,8 +192,10 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
         for (const auto& [k, c] : local_new) shard[k] += c;
     }
     // Implicit barrier
+    if (prof) prop_profile().emit += prof_now() - _t;
 
     // Each thread merges incoming partners from all other threads
+    _t = prof ? prof_now() : 0.0;
 #pragma omp parallel num_threads(n_threads)
     {
         int tid = omp_get_thread_num();
@@ -168,6 +203,10 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
         for (int src = 0; src < n_threads; src++) {
             for (const auto& [k, c] : outgoing[src][tid]) shard[k] += c;
         }
+    }
+    if (prof) {
+        prop_profile().merge += prof_now() - _t;
+        prop_profile().n_gates++;
     }
 }
 

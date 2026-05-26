@@ -424,6 +424,22 @@ void add_pauli_propagation(py::module_& m) {
         Gate batching is on by default.
         )DOC");
 
+    // --- per-phase propagation profiling (OMP / sharded) -------------------
+    m.def("profile_reset", []() {
+        pauli_gates::prop_profile().reset();
+        pauli_gates::prop_profile().enabled = true;
+    });
+    m.def("profile_disable", []() { pauli_gates::prop_profile().enabled = false; });
+    m.def("profile_get", []() {
+        auto& p = pauli_gates::prop_profile();
+        py::dict d;
+        d["snapshot"] = p.snapshot;
+        d["emit"] = p.emit;
+        d["merge"] = p.merge;
+        d["n_gates"] = p.n_gates;
+        return d;
+    });
+
     m.attr("has_openmp") =
 #ifdef FF_OPENMP
         true;
