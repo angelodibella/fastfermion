@@ -437,6 +437,11 @@ void add_pauli_propagation(py::module_& m) {
         d["emit"] = p.emit;
         d["merge"] = p.merge;
         d["n_gates"] = p.n_gates;
+        // sharded backend: per-thread work times and partner-routing split
+        d["emit_per_thread"] = p.emit_thread;
+        d["merge_per_thread"] = p.merge_thread;
+        d["n_local"] = p.n_local;
+        d["n_remote"] = p.n_remote;
         return d;
     });
 

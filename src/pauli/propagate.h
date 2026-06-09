@@ -28,13 +28,31 @@ namespace pauli_gates {
 
 // =========================================================================
 // Per-phase wall-time profiling (opt-in; near-zero cost when disabled).
-// Every accumulation happens in a serial region, so it is race-free.
+// Scalar accumulations happen in serial regions; the per-thread slots are
+// written only by their owning thread. Both are race-free.
 // =========================================================================
 struct PropProfile {
     double snapshot = 0, emit = 0, merge = 0;
     long long n_gates = 0;
     bool enabled = false;
-    void reset() { snapshot = emit = merge = 0; n_gates = 0; }
+    // Sharded backend only: per-thread work time inside the emit/merge
+    // regions (exposes load imbalance and barrier wait), and how many
+    // emitted partners stayed in their shard vs crossed shards.
+    std::vector<double> emit_thread, merge_thread;
+    long long n_local = 0, n_remote = 0;
+    void reset() {
+        snapshot = emit = merge = 0;
+        n_gates = 0;
+        emit_thread.clear();
+        merge_thread.clear();
+        n_local = n_remote = 0;
+    }
+    void ensure_threads(int n) {
+        if (static_cast<int>(emit_thread.size()) < n) {
+            emit_thread.resize(n, 0.0);
+            merge_thread.resize(n, 0.0);
+        }
+    }
 };
 inline PropProfile& prop_profile() {
     static PropProfile p;
@@ -161,6 +179,7 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
     const PauliString& ps = gate.ps;
     const ff_float cos_t = cos(gate.theta);
     const ff_complex isin_t = ff_complex(0, sin(gate.theta));
+    if (prof) prop_profile().ensure_threads(n_threads);
 
     // outgoing[src][dst]: partners from thread src destined for thread dst
     std::vector<std::vector<SendBuf>> outgoing(n_threads, std::vector<SendBuf>(n_threads));
@@ -171,6 +190,7 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
         int tid = omp_get_thread_num();
         auto& shard = shards[tid];
         SendBuf local_new;
+        const double _tt = prof ? prof_now() : 0.0;
 
         for (auto& [x, coeff] : shard) {
             if (!x.commutes(ps)) {
@@ -190,6 +210,17 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
 
         // Insert partners that stayed in this shard
         for (const auto& [k, c] : local_new) shard[k] += c;
+
+        if (prof) {
+            long long nr = 0;
+            for (int d = 0; d < n_threads; d++)
+                nr += static_cast<long long>(outgoing[tid][d].size());
+            prop_profile().emit_thread[tid] += prof_now() - _tt;
+#pragma omp atomic
+            prop_profile().n_local += static_cast<long long>(local_new.size());
+#pragma omp atomic
+            prop_profile().n_remote += nr;
+        }
     }
     // Implicit barrier
     if (prof) prop_profile().emit += prof_now() - _t;
@@ -200,9 +231,11 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
     {
         int tid = omp_get_thread_num();
         auto& shard = shards[tid];
+        const double _tt = prof ? prof_now() : 0.0;
         for (int src = 0; src < n_threads; src++) {
             for (const auto& [k, c] : outgoing[src][tid]) shard[k] += c;
         }
+        if (prof) prop_profile().merge_thread[tid] += prof_now() - _tt;
     }
     if (prof) {
         prop_profile().merge += prof_now() - _t;
