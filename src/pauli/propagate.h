@@ -174,23 +174,36 @@ inline PauliPolynomial from_sharded(const ShardedPoly& shards) {
     return out;
 }
 
-inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegree, int n_threads) {
+// Persistent cross-shard routing buffers, allocated once and reused across gates.
+// outgoing[src][dst] holds partners from thread src bound for thread dst; local[tid]
+// holds partners that stay in shard tid. Reusing them (clear, retain capacity) removes
+// the per-gate t*t reconstruction that capped sharded scaling above 32 threads.
+struct ShardBuffers {
+    std::vector<std::vector<SendBuf>> outgoing;
+    std::vector<SendBuf> local;
+    explicit ShardBuffers(int n_threads)
+        : outgoing(n_threads, std::vector<SendBuf>(n_threads)), local(n_threads) {}
+};
+
+inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegree, int n_threads,
+                              ShardBuffers& buf) {
     const bool prof = prop_profile().enabled;
     const PauliString& ps = gate.ps;
     const ff_float cos_t = cos(gate.theta);
     const ff_complex isin_t = ff_complex(0, sin(gate.theta));
     if (prof) prop_profile().ensure_threads(n_threads);
 
-    // outgoing[src][dst]: partners from thread src destined for thread dst
-    std::vector<std::vector<SendBuf>> outgoing(n_threads, std::vector<SendBuf>(n_threads));
-
     double _t = prof ? prof_now() : 0.0;
 #pragma omp parallel num_threads(n_threads)
     {
         int tid = omp_get_thread_num();
         auto& shard = shards[tid];
-        SendBuf local_new;
+        SendBuf& local_new = buf.local[tid];
         const double _tt = prof ? prof_now() : 0.0;
+
+        // Reuse this thread's buffers (retain capacity); no per-gate reallocation.
+        local_new.clear();
+        for (auto& out : buf.outgoing[tid]) out.clear();
 
         for (auto& [x, coeff] : shard) {
             if (!x.commutes(ps)) {
@@ -202,7 +215,7 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
                     if (dest == tid)
                         local_new.emplace_back(pk, pc);
                     else
-                        outgoing[tid][dest].emplace_back(pk, pc);
+                        buf.outgoing[tid][dest].emplace_back(pk, pc);
                 }
                 coeff *= cos_t;
             }
@@ -214,7 +227,7 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
         if (prof) {
             long long nr = 0;
             for (int d = 0; d < n_threads; d++)
-                nr += static_cast<long long>(outgoing[tid][d].size());
+                nr += static_cast<long long>(buf.outgoing[tid][d].size());
             prop_profile().emit_thread[tid] += prof_now() - _tt;
 #pragma omp atomic
             prop_profile().n_local += static_cast<long long>(local_new.size());
@@ -233,7 +246,7 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
         auto& shard = shards[tid];
         const double _tt = prof ? prof_now() : 0.0;
         for (int src = 0; src < n_threads; src++) {
-            for (const auto& [k, c] : outgoing[src][tid]) shard[k] += c;
+            for (const auto& [k, c] : buf.outgoing[src][tid]) shard[k] += c;
         }
         if (prof) prop_profile().merge_thread[tid] += prof_now() - _tt;
     }
@@ -426,6 +439,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
     // -----------------------------------------------------------------
     if (strategy == "sharded") {
         ShardedPoly shards = to_sharded(obs, n_threads);
+        ShardBuffers buf(n_threads);  // persistent routing buffers, reused every gate
 
         if (!batched) {
             for (int i = circuit.size() - 1; i >= 0; i--) {
@@ -441,7 +455,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                         shards = to_sharded(obs, n_threads);
                         pending_clifford = false;
                     }
-                    conjugate_sharded(shards, std::get<ROT>(circuit[i]), maxdegree, n_threads);
+                    conjugate_sharded(shards, std::get<ROT>(circuit[i]), maxdegree, n_threads, buf);
                     truncate_sharded(shards, n_threads, mincoeff, topk, max_xweight, xtrunc_period,
                                      rot_count);
                     rot_count++;
@@ -453,7 +467,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                 if (rot_buffer.empty()) return;
                 for (const auto& batch : batch_commuting_gates(rot_buffer)) {
                     for (const auto& gate : batch)
-                        conjugate_sharded(shards, gate, maxdegree, n_threads);
+                        conjugate_sharded(shards, gate, maxdegree, n_threads, buf);
                     rot_count += batch.size();
                     truncate_sharded(shards, n_threads, mincoeff, topk, max_xweight, xtrunc_period,
                                      rot_count - 1);
