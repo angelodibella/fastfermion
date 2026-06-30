@@ -18,8 +18,12 @@
 
 namespace fastfermion {
 
-// Max supported qubits = 64 * SYS_NUM_ULONG
+// Max supported qubits = 64 * SYS_NUM_ULONG. Overridable at build time via
+// -DSYS_NUM_ULONG=N: =1 for systems of <=64 spins is ~2x faster (the Pauli key is
+// one machine word instead of two); the default 2 covers up to 128 qubits.
+#ifndef SYS_NUM_ULONG
 #define SYS_NUM_ULONG 2
+#endif
 
 #define MIN(a, b) ((a < b) ? (a) : (b))
 #define MAX(a, b) ((a > b) ? (a) : (b))
