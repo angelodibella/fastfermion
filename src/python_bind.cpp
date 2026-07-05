@@ -398,6 +398,8 @@ void add_pauli_propagation(py::module_& m) {
            int max_xweight, int xtrunc_period, bool batched, const std::string& parallel) {
 #ifndef FF_OPENMP
             if (n_threads > 1) {
+                // The GIL is released for the whole call; reacquire to warn.
+                py::gil_scoped_acquire gil;
                 PyErr_WarnEx(PyExc_RuntimeWarning,
                              "n_threads > 1 ignored: fastfermion was built without OpenMP", 1);
             }
@@ -413,15 +415,17 @@ void add_pauli_propagation(py::module_& m) {
         py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
         py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         py::arg("max_xweight") = -1, py::arg("xtrunc_period") = 1, py::arg("batched") = true,
-        py::arg("parallel") = "auto",
+        py::arg("parallel") = "auto", py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Pauli propagation (Heisenberg-picture evolution through a circuit).
 
-        parallel: "auto" (default), "serial", "omp", or "sharded".
+        parallel: "auto" (default), "serial", "omp", "sharded", or "gpu".
           - "auto": serial when n_threads=1, sharded when n_threads>1.
           - "omp": parallel emission, serial hash-map rebuild.
           - "sharded": sharded hash-map with all-parallel merge.
-        Gate batching is on by default.
+          - "gpu": CUDA sorted-array engine (requires a build with -Dgpu=enabled
+            and a CUDA device; supports maxdegree and mincoeff).
+        Gate batching is on by default. The GIL is released for the whole call.
         )DOC");
 
     // --- per-phase propagation profiling (OMP / sharded) -------------------
@@ -450,6 +454,24 @@ void add_pauli_propagation(py::module_& m) {
         true;
 #else
         false;
+#endif
+
+    // --- GPU backend ----------------------------------------------------
+    m.attr("has_gpu") =
+#ifdef FF_GPU
+        true;
+    m.def("gpu_device_count", []() { return pauli_gates::gpu::device_count(); },
+          "Number of CUDA devices visible at runtime.");
+    m.def("_gpu_phase_check",
+          [](int n_pairs, std::uint64_t seed) {
+              return pauli_gates::gpu_phase_selftest(n_pairs, seed);
+          },
+          py::arg("n_pairs") = 100000, py::arg("seed") = 1234,
+          "Check the device Pauli-product phase rule against the host oracle.");
+#else
+        false;
+    m.def("gpu_device_count", []() { return 0; },
+          "Number of CUDA devices visible at runtime.");
 #endif
 }
 

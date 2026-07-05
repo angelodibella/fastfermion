@@ -1,0 +1,12 @@
+option(
+  'gpu',
+  type: 'feature',
+  value: 'auto',
+  description: 'CUDA GPU backend (parallel="gpu"); auto enables it when nvcc is found',
+)
+option(
+  'gpu_arch',
+  type: 'string',
+  value: 'native',
+  description: 'nvcc -arch value (native, all-major, sm_90, ...)',
+)

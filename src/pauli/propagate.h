@@ -6,7 +6,8 @@
 //   "serial"   — baseline, one thread
 //   "omp"      — parallel emission, serial hash-map rebuild
 //   "sharded"  — sharded hash-map, all-parallel merge
-//   "auto"     — serial when n_threads=1, sharded when n_threads>1
+//   "gpu"      — CUDA sorted-array engine (built with -Dgpu=enabled; see GPU_PLAN.md)
+//   "auto"     — serial when n_threads=1, sharded when n_threads>1 (never gpu)
 //
 // Gate batching is on by default.
 
@@ -18,6 +19,12 @@
 #include "common.h"
 #include "pauli/gates.h"
 #include "pauli/truncate.h"
+
+#ifdef FF_GPU
+#include <random>
+
+#include "pauli/propagate_gpu.h"
+#endif
 
 #ifdef FF_OPENMP
 #include <omp.h>
@@ -303,6 +310,165 @@ inline std::vector<std::vector<ROT>> batch_commuting_gates(const std::vector<ROT
     return batches;
 }
 
+#ifdef FF_GPU
+// =========================================================================
+// GPU path (CUDA sorted-array engine in propagate_gpu.cu)
+//
+// The host owns everything algebraic: key-width choice, flattening to raw
+// words, Clifford segments, gate order/batching, and the truncation
+// schedule. The engine owns only the device term array.
+// =========================================================================
+
+// Narrowest per-plane word count covering the observable and every gate;
+// XOR closure keeps partners inside it.
+inline int _gpu_key_words(const Circuit& circuit, const PauliPolynomial& a) {
+    int extent = 1;
+    for (const auto& [x, c] : a.terms) extent = MAX(extent, x.extent());
+    for (const auto& g : circuit) {
+        if (g.index() == 1) {
+            extent = MAX(extent, std::get<ROT>(g).ps.extent());
+        } else {
+            std::visit(
+                [&extent](const auto& v) {
+                    extent = MAX(extent, v.i + 1);
+                    if constexpr (requires { v.j; }) extent = MAX(extent, v.j + 1);
+                },
+                std::get<CliffordGate>(g));
+        }
+    }
+    return (extent + WORD_LENGTH - 1) / WORD_LENGTH;
+}
+
+inline void _gpu_flatten_key(const PauliString& s, int words, std::uint64_t* out) {
+    for (int i = 0; i < words; i++) out[i] = (i < SYS_NUM_ULONG) ? s.xory.words[i] : 0;
+    for (int i = 0; i < words; i++) out[words + i] = (i < SYS_NUM_ULONG) ? s.yorz.words[i] : 0;
+}
+
+inline void _gpu_upload(gpu::Engine& eng, const PauliPolynomial& p, int words) {
+    std::vector<std::uint64_t> keys(2 * std::size_t(words) * p.terms.size());
+    std::vector<double> coeffs(p.terms.size());
+    std::size_t i = 0;
+    for (const auto& [x, c] : p.terms) {
+        // ROT conjugation of a Hermitian observable keeps coefficients real;
+        // the engine stores real doubles, so anything else is a hard error.
+        if (std::abs(c.imag()) > 1e-12 * (1.0 + std::abs(c.real())))
+            throw_error("gpu backend requires a real observable (imaginary coefficient found)");
+        _gpu_flatten_key(x, words, &keys[2 * std::size_t(words) * i]);
+        coeffs[i] = c.real();
+        i++;
+    }
+    eng.upload(keys.data(), coeffs.data(), p.terms.size());
+}
+
+inline PauliPolynomial _gpu_download(gpu::Engine& eng, int words) {
+    std::vector<std::uint64_t> keys;
+    std::vector<double> coeffs;
+    eng.download(keys, coeffs);
+    PauliPolynomial out;
+    out.terms.reserve(coeffs.size());
+    for (std::size_t i = 0; i < coeffs.size(); i++) {
+        ff_ulong xory(0), yorz(0);
+        for (int w = 0; w < MIN(words, SYS_NUM_ULONG); w++) {
+            xory.words[w] = keys[2 * std::size_t(words) * i + w];
+            yorz.words[w] = keys[2 * std::size_t(words) * i + words + w];
+        }
+        out.terms[PauliString(xory, yorz)] = coeffs[i];
+    }
+    return out;
+}
+
+inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPolynomial& a,
+                                          int maxdegree, ff_float mincoeff, bool batched) {
+    if (gpu::device_count() == 0) throw_error("gpu backend: no CUDA device available");
+    const int words = _gpu_key_words(circuit, a);
+    if (words > 2) throw_error("gpu backend supports at most 128 qubits");
+
+    gpu::Engine eng(words, a.terms.size());
+    _gpu_upload(eng, a, words);
+    std::vector<std::uint64_t> pkey(2 * words);
+
+    // Threshold cadence mirrors truncate_all: per gate unbatched, per
+    // commuting batch batched. The pure weight cutoff (mincoeff = 0) needs no
+    // scheduled compaction at all — the retained set is compaction-invariant,
+    // so deduplication is deferred to the engine's budget (GPU_PLAN.md, D1).
+    auto apply_rots = [&](const std::vector<ROT>& rots) {
+        auto rot = [&](const ROT& g) {
+            _gpu_flatten_key(g.ps, words, pkey.data());
+            eng.apply_rot(pkey.data(), g.theta, maxdegree);
+        };
+        if (!batched) {
+            for (const auto& g : rots) {
+                rot(g);
+                if (mincoeff > 0) eng.compact(mincoeff);
+            }
+        } else {
+            for (const auto& batch : batch_commuting_gates(rots)) {
+                for (const auto& g : batch) rot(g);
+                if (mincoeff > 0) eng.compact(mincoeff);
+            }
+        }
+    };
+
+    std::vector<ROT> rot_buffer;
+    auto flush = [&]() {
+        if (rot_buffer.empty()) return;
+        apply_rots(rot_buffer);
+        rot_buffer.clear();
+    };
+
+    int clifford_begin = 0;
+    bool pending_clifford = false;
+    for (int i = circuit.size() - 1; i >= 0; i--) {
+        if (circuit[i].index() == 0) {
+            flush();
+            if (!pending_clifford) {
+                clifford_begin = i;
+                pending_clifford = true;
+            }
+        } else if (circuit[i].index() == 1) {
+            if (pending_clifford) {  // Clifford segments round-trip through the host (rare)
+                PauliPolynomial obs = _gpu_download(eng, words);
+                _apply_clifford_circuit(obs, circuit, i + 1, clifford_begin + 1);
+                _gpu_upload(eng, obs, words);
+                pending_clifford = false;
+            }
+            rot_buffer.push_back(std::get<ROT>(circuit[i]));
+        }
+    }
+    flush();
+    if (pending_clifford) {
+        PauliPolynomial obs = _gpu_download(eng, words);
+        _apply_clifford_circuit(obs, circuit, 0, clifford_begin + 1);
+        return obs;
+    }
+    return _gpu_download(eng, words);
+}
+
+// Random-pair check of the device phase rule against the host oracle
+// (pauli_string_multiply) — the one identity the engine duplicates.
+inline bool gpu_phase_selftest(int n_pairs, std::uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    const int words = SYS_NUM_ULONG;
+    std::vector<std::uint64_t> a(2 * std::size_t(words) * n_pairs);
+    std::vector<std::uint64_t> b(2 * std::size_t(words) * n_pairs);
+    std::vector<int> expected(n_pairs);
+    for (int i = 0; i < n_pairs; i++) {
+        ff_ulong ax(0), az(0), bx(0), bz(0);
+        for (int w = 0; w < words; w++) {
+            ax.words[w] = rng(), az.words[w] = rng();
+            bx.words[w] = rng(), bz.words[w] = rng();
+        }
+        PauliString p(ax, az), q(bx, bz);
+        _gpu_flatten_key(p, words, &a[2 * std::size_t(words) * i]);
+        _gpu_flatten_key(q, words, &b[2 * std::size_t(words) * i]);
+        int jpow = 0;
+        pauli_string_multiply(p, jpow, q);
+        expected[i] = ((jpow % 4) + 4) % 4;
+    }
+    return gpu::phase_check(a.data(), b.data(), expected.data(), n_pairs, words);
+}
+#endif  // FF_GPU
+
 // =========================================================================
 // Public API
 // =========================================================================
@@ -318,6 +484,15 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
     // Resolve "auto": serial when single-threaded, sharded otherwise
     std::string strategy = parallel;
     if (strategy == "auto") strategy = (n_threads > 1) ? "sharded" : "serial";
+    if (strategy == "gpu") {
+#ifdef FF_GPU
+        if (topk > 0 || max_xweight >= 0)
+            throw_error("gpu backend does not support topk or max_xweight yet");
+        return propagate_gpu_path(circuit, a, maxdegree, mincoeff, batched);
+#else
+        throw_error("fastfermion was built without GPU support (rebuild with -Dgpu=enabled)");
+#endif
+    }
     if (n_threads <= 1) strategy = "serial";
 
     PauliPolynomial obs(a);

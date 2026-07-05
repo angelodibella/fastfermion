@@ -46,15 +46,35 @@ else
   message('OpenMP: not found, building without shared-memory parallelism')
 endif
 
+# CUDA: optional, enables the GPU backend (parallel="gpu")
+gpu_opt = get_option('gpu')
+have_gpu = false
+if not gpu_opt.disabled()
+  have_gpu = add_languages('cuda', required: gpu_opt.enabled(), native: false)
+endif
+
+ff_sources = ['src/python_bind.cpp']
+ff_cuda_args = []
+if have_gpu
+  ff_deps += dependency('cuda', required: true)
+  ff_args += '-DFF_GPU'
+  ff_cuda_args = ['-DFF_GPU', '-O3', '-std=c++20', '-arch=' + get_option('gpu_arch')]
+  ff_sources += 'src/pauli/propagate_gpu.cu'
+  message('GPU backend: enabled (nvcc -arch=' + get_option('gpu_arch') + ')')
+else
+  message('GPU backend: disabled')
+endif
+
 # --- Extension module ---
 
 ffcore = py.extension_module(
   'ffcore',
-  'src/python_bind.cpp',
+  ff_sources,
   subdir: 'fastfermion',
   dependencies: ff_deps,
   include_directories: ['src', 'src/hashmap'],
   cpp_args: ff_args,
+  cuda_args: ff_cuda_args,
   install: true,
 )
 
