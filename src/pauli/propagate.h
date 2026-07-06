@@ -387,10 +387,15 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
     _gpu_upload(eng, a, words);
     std::vector<std::uint64_t> pkey(2 * words);
 
-    // Threshold cadence mirrors truncate_all: per gate unbatched, per
-    // commuting batch batched. The pure weight cutoff (mincoeff = 0) needs no
-    // scheduled compaction at all — the retained set is compaction-invariant,
-    // so deduplication is deferred to the engine's budget (GPU_PLAN.md, D1).
+    // Threshold compaction follows the same cadence as the CPU truncate_all:
+    // once per gate when unbatched, once per commuting batch when batched, so
+    // both backends discard the same terms at the same points. A pure weight
+    // cutoff (mincoeff = 0) needs no scheduled compaction: the weight filter at
+    // emission reads only the Pauli string, never the coefficient, so whether
+    // duplicates have been summed yet cannot change which terms survive. The
+    // retained set is thus independent of the compaction schedule, and
+    // deduplication can be deferred to the engine's capacity budget
+    // (GPU_PLAN.md, D1).
     auto apply_rots = [&](const std::vector<ROT>& rots) {
         auto rot = [&](const ROT& g) {
             _gpu_flatten_key(g.ps, words, pkey.data());

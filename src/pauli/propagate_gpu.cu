@@ -81,6 +81,8 @@ __device__ inline bool anticommutes(const Key<W>& p, const Key<W>& q) {
     return m & 1;
 }
 
+// Pauli weight of the product p*q: count the sites where the XORed planes
+// still act (the partner's key is exactly this XOR).
 template <int W>
 __device__ inline int partner_weight(const Key<W>& p, const Key<W>& q) {
     int w = 0;
@@ -102,6 +104,16 @@ __device__ inline int jpow_mod4(const Key<W>& p, const Key<W>& q) {
 
 // --- kernels -------------------------------------------------------------
 
+// Emission per gate runs as three steps with no atomics and no locks: k_flag
+// marks each term 0/1; an inclusive prefix sum (running totals) turns the
+// marks into output slots -- the k-th marked term reserves slot k -- and
+// k_emit writes only into its own reserved slot, so no two threads ever share
+// a write target. Slots are reserved up front (instead of the simpler shared
+// atomic counter) for reproducibility: it fixes the append order, and
+// floating-point sums depend on their order, so every run is bit-identical.
+
+// Mark term i when it anticommutes with the gate p (so ROT rotates it) and the
+// partner it would spawn survives the degree cutoff (weight <= maxw).
 template <int W>
 __global__ void k_flag(const Key<W>* keys, std::size_t n, Key<W> p, int maxw, unsigned* flag) {
     std::size_t i = std::size_t(blockIdx.x) * BLOCK + threadIdx.x;
@@ -110,9 +122,10 @@ __global__ void k_flag(const Key<W>* keys, std::size_t n, Key<W> p, int maxw, un
     flag[i] = (anticommutes(p, q) && partner_weight(p, q) <= maxw) ? 1u : 0u;
 }
 
-// pos = inclusive prefix sum of the flags. Scales every anticommuting
-// coefficient by cos(theta) in place (independent of the partner filter,
-// matching the CPU conjugation) and appends surviving partners at the tail.
+// pos now holds the prefix sums from k_flag. Scale every anticommuting
+// coefficient by cos(theta) in place (done for all anticommuting terms,
+// independent of the weight filter, matching the CPU conjugation); a term that
+// also passed the filter writes its partner into its reserved tail slot.
 template <int W>
 __global__ void k_emit(Key<W>* keys, double* coeffs, std::size_t n, Key<W> p, double cos_t,
                        double sin_t, const unsigned* pos) {
@@ -121,6 +134,8 @@ __global__ void k_emit(Key<W>* keys, double* coeffs, std::size_t n, Key<W> p, do
     const Key<W> q = keys[i];
     if (!anticommutes(p, q)) return;
     const double a = coeffs[i];
+    // pos[i-1] counts the flagged terms before i, which is this term's
+    // reserved slot; the flag itself is recovered as pos[i] > pos[i-1].
     const unsigned prev = i ? pos[i - 1] : 0u;
     if (pos[i] > prev) {
         Key<W> r;
@@ -134,12 +149,17 @@ __global__ void k_emit(Key<W>* keys, double* coeffs, std::size_t n, Key<W> p, do
     coeffs[i] = a * cos_t;
 }
 
+// Mark the terms whose coefficient survives the threshold; k_gather then
+// compacts exactly the marked ones (same flag -> prefix-sum -> slot pipeline
+// as emission).
 __global__ void k_flag_thresh(const double* coeffs, std::size_t n, double thr, unsigned* flag) {
     std::size_t i = std::size_t(blockIdx.x) * BLOCK + threadIdx.x;
     if (i >= n) return;
     flag[i] = (fabs(coeffs[i]) > thr) ? 1u : 0u;  // CPU rule discards |c| <= thr
 }
 
+// Compact the keep-flagged terms into keys_out/coeffs_out using the same
+// prefix-sum slots as emission (here pos was scanned from the threshold flags).
 template <int W>
 __global__ void k_gather(const Key<W>* keys_in, const double* coeffs_in, std::size_t n,
                          const unsigned* pos, Key<W>* keys_out, double* coeffs_out) {
@@ -152,6 +172,8 @@ __global__ void k_gather(const Key<W>* keys_in, const double* coeffs_in, std::si
     }
 }
 
+// Recompute the product phase of each string pair on the device and raise
+// `mismatch` if any disagrees with the host-computed expectation.
 template <int W>
 __global__ void k_phase_check(const Key<W>* a, const Key<W>* b, const int* expected,
                               std::size_t n, int* mismatch) {
@@ -162,7 +184,15 @@ __global__ void k_phase_check(const Key<W>* a, const Key<W>* b, const int* expec
 
 // --- engine --------------------------------------------------------------
 
-// Width-erased interface; EngineT<W> holds the device state.
+// Key width W (64-bit words per Pauli plane) is a compile-time template so
+// the per-word loops in the kernels unroll to straight-line code; the compiler
+// emits one full kernel set for W=1 (<=64 qubits) and one for W=2 (<=128).
+// That makes EngineT<1> and EngineT<2> two unrelated C++ types, yet the width
+// is only known at runtime (from the circuit), so no single member variable
+// could hold "whichever was chosen". This small virtual interface solves
+// that: both instantiations derive from ImplBase, and one ImplBase pointer
+// can hold either. The price is one virtual call per host-side operation --
+// negligible next to the kernels it launches; nothing on the GPU is virtual.
 struct ImplBase {
     virtual ~ImplBase() = default;
     virtual void upload(const std::uint64_t*, const double*, std::size_t) = 0;
@@ -174,14 +204,24 @@ struct ImplBase {
 
 template <int W>
 struct EngineT final : ImplBase {
+    // The term array is one allocation split into two regions: a sorted,
+    // duplicate-free prefix of length `base`, then an unsorted `tail` of
+    // freshly emitted partners. Emission grows the tail; compact() folds the
+    // tail into a new, larger base. `cap` is the allocated term capacity.
     std::size_t cap = 0, base = 0, tail = 0;
-    Key<W>*ka = nullptr, *kb = nullptr;  // ping-pong key buffers (ka = current)
+    // Two interchangeable buffer sets: ka/ca is current, kb/cb is scratch.
+    // Parallel merge and duplicate-summing cannot run in place, so they read
+    // the current set and write the other; a swap then makes the result
+    // current. The roles alternate ("ping-pong") across compactions.
+    Key<W>*ka = nullptr, *kb = nullptr;
     double *ca = nullptr, *cb = nullptr;
-    unsigned* pos = nullptr;  // per-term flags, scanned in place to offsets
-    int* d_nruns = nullptr;
-    void* tmp = nullptr;  // reusable cub workspace
+    unsigned* pos = nullptr;  // per-term 0/1 flags, prefix-summed in place to slots
+    int* d_nruns = nullptr;   // device int: deduplication writes its unique-key count here
+    void* tmp = nullptr;      // shared CUB scratch buffer (see cub_tmp)
     std::size_t tmp_cap = 0;
-    unsigned* h_count = nullptr;  // pinned readback scalars
+    // Page-locked ("pinned") host integers that the GPU can write directly,
+    // for reading single counts back cheaply.
+    unsigned* h_count = nullptr;
     int* h_nruns = nullptr;
 
     explicit EngineT(std::size_t capacity_hint) {
@@ -197,6 +237,11 @@ struct EngineT final : ImplBase {
         cudaFreeHost(h_count), cudaFreeHost(h_nruns);
     }
 
+    // Grow the buffers to hold at least `need` terms. Capacity doubles so the
+    // total copying over all grows stays proportional to the final size (each
+    // term moves at most twice on average) and grows stay rare. The old and
+    // new allocations coexist during the copy, so a grow transiently needs
+    // both at once -- cheap normally, costly near the memory ceiling.
     void grow(std::size_t need) {
         if (need <= cap) return;
         std::size_t ncap = std::max(need, 2 * cap);
@@ -219,6 +264,14 @@ struct EngineT final : ImplBase {
         ka = nka, kb = nkb, ca = nca, cb = ncb, pos = npos, cap = ncap;
     }
 
+    // CUB routines need device scratch memory, and their API sizes it like
+    // this: called with a NULL workspace pointer, a routine does no work and
+    // only writes the byte count it needs into `bytes`; called again with a
+    // real buffer, it executes. That is why every CUB operation in this file
+    // appears as two consecutive identical-looking calls -- a size query and
+    // then the actual run -- not a mistake. This helper provides the buffer,
+    // regrown only when a request exceeds the largest seen, so the steady
+    // state never allocates.
     void* cub_tmp(std::size_t bytes) {
         if (bytes > tmp_cap) {
             cudaFree(tmp);
@@ -228,11 +281,12 @@ struct EngineT final : ImplBase {
         return tmp;
     }
 
-    // Inclusive prefix sum of pos[0:n) in place; returns the total.
+    // Inclusive prefix sum (running totals) of pos[0:n) in place; the last
+    // entry, read back, is the total number of set flags.
     unsigned scan_pos(std::size_t n) {
         std::size_t bytes = 0;
-        cub::DeviceScan::InclusiveSum(nullptr, bytes, pos, pos, n);
-        cub::DeviceScan::InclusiveSum(cub_tmp(bytes), bytes, pos, pos, n);
+        cub::DeviceScan::InclusiveSum(nullptr, bytes, pos, pos, n);         // NULL ptr: only size the scratch
+        cub::DeviceScan::InclusiveSum(cub_tmp(bytes), bytes, pos, pos, n);  // real buffer: run the scan
         cuda_check(cudaMemcpy(h_count, pos + n - 1, sizeof(unsigned), cudaMemcpyDeviceToHost),
                    "scan readback");
         return *h_count;
@@ -252,13 +306,15 @@ struct EngineT final : ImplBase {
     void apply_rot(const std::uint64_t* p_key, double theta, int maxdegree) override {
         std::size_t n = base + tail;
         if (n == 0) return;
-        if (2 * n > cap) {  // deferred-dedup budget reached: compact, then grow if still short
+        if (2 * n > cap) {  // worst case every term forks (n -> 2n): tidy first, grow only if still short
             compact(0.0);
             n = base;
             grow(2 * n);
         }
         Key<W> p;
         for (int k = 0; k < 2 * W; k++) p.v[k] = p_key[k];
+        // Deterministic emission (see "--- kernels"): flag terms, reserve one
+        // tail slot per surviving partner via the prefix sum, then emit.
         k_flag<W><<<n_blocks(n), BLOCK>>>(ka, n, p, maxdegree, pos);
         const unsigned emitted = scan_pos(n);
         k_emit<W><<<n_blocks(n), BLOCK>>>(ka, ca, n, p, std::cos(theta), std::sin(theta), pos);
@@ -266,16 +322,25 @@ struct EngineT final : ImplBase {
         tail += emitted;
     }
 
+    // Fold the emitted tail into the base so the whole array is sorted and
+    // duplicate-free again: sort the tail, merge it into the sorted base, then
+    // sum the coefficients of equal keys. With mincoeff > 0 a final pass drops
+    // terms at or below the threshold. (Every CUB operation below appears as
+    // two identical-looking calls: the first only sizes its scratch, the
+    // second runs -- see cub_tmp.)
     void compact(double mincoeff) override {
         std::size_t n = base + tail;
         if (n == 0) return;
         if (tail) {
+            // Sort just the freshly emitted tail by key.
             std::size_t bytes = 0;
             cub::DeviceMergeSort::SortPairs(nullptr, bytes, ka + base, ca + base, tail,
                                             KeyLess<W>{});
             cub::DeviceMergeSort::SortPairs(cub_tmp(bytes), bytes, ka + base, ca + base, tail,
                                             KeyLess<W>{});
             if (base) {
+                // Merge the sorted tail with the sorted base into the scratch
+                // set (a merge cannot overwrite its own inputs in place).
                 bytes = 0;
                 cub::DeviceMerge::MergePairs(nullptr, bytes, ka, ca, static_cast<int>(base),
                                              ka + base, ca + base, static_cast<int>(tail), kb, cb,
@@ -283,19 +348,23 @@ struct EngineT final : ImplBase {
                 cub::DeviceMerge::MergePairs(cub_tmp(bytes), bytes, ka, ca, static_cast<int>(base),
                                              ka + base, ca + base, static_cast<int>(tail), kb, cb,
                                              KeyLess<W>{});
-                std::swap(ka, kb), std::swap(ca, cb);  // merged now in current
+                std::swap(ka, kb), std::swap(ca, cb);  // merged result is now current
             }
+            // Collapse equal adjacent keys, summing coefficients; the run count
+            // (number of unique keys) lands in d_nruns. Reads current, writes scratch.
             bytes = 0;
             cub::DeviceReduce::ReduceByKey(nullptr, bytes, ka, kb, ca, cb, d_nruns, cub::Sum{}, n);
             cub::DeviceReduce::ReduceByKey(cub_tmp(bytes), bytes, ka, kb, ca, cb, d_nruns,
                                            cub::Sum{}, n);
             cuda_check(cudaMemcpy(h_nruns, d_nruns, sizeof(int), cudaMemcpyDeviceToHost),
                        "reduce readback");
-            std::swap(ka, kb), std::swap(ca, cb);
+            std::swap(ka, kb), std::swap(ca, cb);  // deduplicated result is now current
             base = static_cast<std::size_t>(*h_nruns);
             tail = 0;
         }
         if (mincoeff > 0 && base) {
+            // Threshold via the same flag -> prefix-sum -> gather slot pipeline
+            // as emission: flag terms to keep, scan to slots, gather to scratch.
             k_flag_thresh<<<n_blocks(base), BLOCK>>>(ca, base, mincoeff, pos);
             const unsigned kept = scan_pos(base);
             k_gather<W><<<n_blocks(base), BLOCK>>>(ka, ca, base, pos, kb, cb);
@@ -307,6 +376,8 @@ struct EngineT final : ImplBase {
 
     std::size_t size() const override { return base + tail; }
 
+    // Copy the term set back to the host, compacting first so what leaves the
+    // device is sorted and duplicate-free.
     void download(std::vector<std::uint64_t>& keys, std::vector<double>& coeffs) override {
         compact(0.0);
         keys.resize(2 * W * base);
@@ -331,6 +402,8 @@ struct Engine::Impl {
     std::unique_ptr<ImplBase> e;
 };
 
+// Pick the compiled kernel set matching this circuit's key width (see the
+// ImplBase note above).
 Engine::Engine(int words, std::size_t capacity_hint) : impl(new Impl) {
     if (words == 1)
         impl->e = std::make_unique<EngineT<1>>(capacity_hint);
@@ -353,6 +426,8 @@ void Engine::download(std::vector<std::uint64_t>& k, std::vector<double>& c) {
     impl->e->download(k, c);
 }
 
+// Ship n string pairs and their host-computed phases to the device, recompute
+// there, and report whether every pair agreed.
 template <int W>
 static bool phase_check_impl(const std::uint64_t* a, const std::uint64_t* b, const int* expected,
                              std::size_t n) {

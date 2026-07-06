@@ -8,11 +8,14 @@
 // deduplication (see GPU_PLAN.md).
 //
 // This header is the only seam between the header-only C++ library and the
-// CUDA translation unit (propagate_gpu.cu). The engine speaks flat machine
-// words and real doubles; every fastfermion type stays on the host side —
-// src/pauli/propagate.h owns the gate loop, key-width choice, Clifford
-// segments, and the truncation schedule. A term's key crosses the boundary
-// as 2*words uint64: [xory words..., yorz words...].
+// CUDA translation unit (propagate_gpu.cu). fastfermion is a single
+// translation-unit, header-only library, and NVIDIA's compiler (nvcc) must
+// never pull it in; keeping only flat machine words and real doubles in these
+// declarations lets the .cu file include this one header alone. Every
+// fastfermion type therefore stays on the host side — src/pauli/propagate.h
+// owns the gate loop, key-width choice, Clifford segments, and the truncation
+// schedule. A term's key crosses the boundary as 2*words uint64:
+// [xory words..., yorz words...].
 
 #pragma once
 
