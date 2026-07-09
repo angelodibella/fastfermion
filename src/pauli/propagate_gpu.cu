@@ -149,14 +149,45 @@ __global__ void k_emit(Key<W>* keys, double* coeffs, std::size_t n, Key<W> p, do
     coeffs[i] = a * cos_t;
 }
 
-// Mark the terms whose coefficient survives the threshold; k_gather then
-// compacts exactly the marked ones (same flag -> prefix-sum -> slot pipeline
-// as emission).
-__global__ void k_flag_thresh(const double* coeffs, std::size_t n, double thr, unsigned* flag) {
+// Pauli weight of a key: sites where either plane acts.
+template <int W>
+__device__ inline int key_weight(const Key<W>& q) {
+    int w = 0;
+    for (int i = 0; i < W; i++) w += __popcll(q.v[i] | q.v[W + i]);
+    return w;
+}
+
+// Mark the terms that survive a truncation event -- the coefficient threshold
+// (thr <= 0 keeps all: the CPU rule discards |c| <= thr only when active) and
+// the deferred weight cutoff (maxw at/above the qubit count keeps all);
+// k_gather then compacts exactly the marked ones (same flag -> prefix-sum ->
+// slot pipeline as emission).
+template <int W>
+__global__ void k_flag_keep(const Key<W>* keys, const double* coeffs, std::size_t n, double thr,
+                            int maxw, unsigned* flag) {
     std::size_t i = std::size_t(blockIdx.x) * BLOCK + threadIdx.x;
     if (i >= n) return;
-    flag[i] = (fabs(coeffs[i]) > thr) ? 1u : 0u;  // CPU rule discards |c| <= thr
+    flag[i] = ((thr <= 0 || fabs(coeffs[i]) > thr) && key_weight(keys[i]) <= maxw) ? 1u : 0u;
 }
+
+// Per-term contribution to the event's discarded-norm certificate: |c|^2 of
+// terms the threshold drops AMONG those the weight rule keeps (delta_e is
+// measured against the weight-only reference, so weight discards do not
+// count). Summed by cub::DeviceReduce through a transform iterator -- exact
+// accumulation of the discards themselves, immune to the cancellation a
+// norm-before-minus-norm-after difference would suffer when the discarded
+// mass is tiny next to the total.
+template <int W>
+struct Disc2Op {
+    const Key<W>* keys;
+    const double* coeffs;
+    double thr;
+    int maxw;
+    __device__ double operator()(std::size_t i) const {
+        const double m = fabs(coeffs[i]);
+        return (key_weight(keys[i]) <= maxw && m <= thr) ? m * m : 0.0;
+    }
+};
 
 // Compact the keep-flagged terms into keys_out/coeffs_out using the same
 // prefix-sum slots as emission (here pos was scanned from the threshold flags).
@@ -197,7 +228,7 @@ struct ImplBase {
     virtual ~ImplBase() = default;
     virtual void upload(const std::uint64_t*, const double*, std::size_t) = 0;
     virtual void apply_rot(const std::uint64_t*, double, int) = 0;
-    virtual void compact(double) = 0;
+    virtual double compact(double, int) = 0;
     virtual std::size_t size() const = 0;
     virtual void download(std::vector<std::uint64_t>&, std::vector<double>&) = 0;
 };
@@ -219,22 +250,26 @@ struct EngineT final : ImplBase {
     int* d_nruns = nullptr;   // device int: deduplication writes its unique-key count here
     void* tmp = nullptr;      // shared CUB scratch buffer (see cub_tmp)
     std::size_t tmp_cap = 0;
-    // Page-locked ("pinned") host integers that the GPU can write directly,
+    double* d_disc2 = nullptr;  // device double: the event's discarded |c|^2 sum
+    // Page-locked ("pinned") host scalars that the GPU can write directly,
     // for reading single counts back cheaply.
     unsigned* h_count = nullptr;
     int* h_nruns = nullptr;
+    double* h_disc2 = nullptr;
 
     explicit EngineT(std::size_t capacity_hint) {
         cuda_check(cudaFree(nullptr), "context init");  // fail early, clearly
         cuda_check(cudaMallocHost(&h_count, sizeof(unsigned)), "pinned alloc");
         cuda_check(cudaMallocHost(&h_nruns, sizeof(int)), "pinned alloc");
+        cuda_check(cudaMallocHost(&h_disc2, sizeof(double)), "pinned alloc");
         cuda_check(cudaMalloc(&d_nruns, sizeof(int)), "device alloc");
+        cuda_check(cudaMalloc(&d_disc2, sizeof(double)), "device alloc");
         grow(std::max<std::size_t>(4 * capacity_hint, std::size_t(1) << 16));
     }
     ~EngineT() override {
         cudaFree(ka), cudaFree(kb), cudaFree(ca), cudaFree(cb);
-        cudaFree(pos), cudaFree(d_nruns), cudaFree(tmp);
-        cudaFreeHost(h_count), cudaFreeHost(h_nruns);
+        cudaFree(pos), cudaFree(d_nruns), cudaFree(d_disc2), cudaFree(tmp);
+        cudaFreeHost(h_count), cudaFreeHost(h_nruns), cudaFreeHost(h_disc2);
     }
 
     // Grow the buffers to hold at least `need` terms. Capacity doubles so the
@@ -299,7 +334,7 @@ struct EngineT final : ImplBase {
             cuda_check(cudaMemcpy(ka, keys, n * sizeof(Key<W>), cudaMemcpyHostToDevice), "upload");
             cuda_check(cudaMemcpy(ca, coeffs, n * sizeof(double), cudaMemcpyHostToDevice),
                        "upload");
-            compact(0.0);  // sort + dedup once; the base stays sorted thereafter
+            compact(0.0, 64 * W);  // sort + dedup once; the base stays sorted thereafter
         }
     }
 
@@ -307,7 +342,7 @@ struct EngineT final : ImplBase {
         std::size_t n = base + tail;
         if (n == 0) return;
         if (2 * n > cap) {  // worst case every term forks (n -> 2n): tidy first, grow only if still short
-            compact(0.0);
+            compact(0.0, 64 * W);
             n = base;
             grow(2 * n);
         }
@@ -328,9 +363,9 @@ struct EngineT final : ImplBase {
     // terms at or below the threshold. (Every CUB operation below appears as
     // two identical-looking calls: the first only sizes its scratch, the
     // second runs -- see cub_tmp.)
-    void compact(double mincoeff) override {
+    double compact(double mincoeff, int maxw) override {
         std::size_t n = base + tail;
-        if (n == 0) return;
+        if (n == 0) return 0.0;
         if (tail) {
             // Sort just the freshly emitted tail by key.
             std::size_t bytes = 0;
@@ -362,16 +397,33 @@ struct EngineT final : ImplBase {
             base = static_cast<std::size_t>(*h_nruns);
             tail = 0;
         }
-        if (mincoeff > 0 && base) {
-            // Threshold via the same flag -> prefix-sum -> gather slot pipeline
-            // as emission: flag terms to keep, scan to slots, gather to scratch.
-            k_flag_thresh<<<n_blocks(base), BLOCK>>>(ca, base, mincoeff, pos);
+        double disc2 = 0.0;
+        const bool w_active = maxw < 64 * W;  // weight never exceeds the qubit count
+        if ((mincoeff > 0 || w_active) && base) {
+            if (mincoeff > 0) {
+                // The certificate's delta_e^2: reduce the dropped |c|^2 directly
+                // (weight-surviving terms only) before the survivors are gathered.
+                Disc2Op<W> op{ka, ca, mincoeff, w_active ? maxw : 64 * W};
+                cub::CountingInputIterator<std::size_t> cnt(0);
+                cub::TransformInputIterator<double, Disc2Op<W>, decltype(cnt)> it(cnt, op);
+                std::size_t bytes = 0;
+                cub::DeviceReduce::Sum(nullptr, bytes, it, d_disc2, base);
+                cub::DeviceReduce::Sum(cub_tmp(bytes), bytes, it, d_disc2, base);
+                cuda_check(cudaMemcpy(h_disc2, d_disc2, sizeof(double), cudaMemcpyDeviceToHost),
+                           "disc2 readback");
+                disc2 = *h_disc2;
+            }
+            // Truncation event via the same flag -> prefix-sum -> gather slot
+            // pipeline as emission: flag terms to keep, scan to slots, gather.
+            k_flag_keep<W><<<n_blocks(base), BLOCK>>>(ka, ca, base, mincoeff,
+                                                      w_active ? maxw : 64 * W, pos);
             const unsigned kept = scan_pos(base);
             k_gather<W><<<n_blocks(base), BLOCK>>>(ka, ca, base, pos, kb, cb);
-            cuda_check(cudaGetLastError(), "threshold");
+            cuda_check(cudaGetLastError(), "truncation event");
             std::swap(ka, kb), std::swap(ca, cb);
             base = kept;
         }
+        return disc2;
     }
 
     std::size_t size() const override { return base + tail; }
@@ -379,7 +431,7 @@ struct EngineT final : ImplBase {
     // Copy the term set back to the host, compacting first so what leaves the
     // device is sorted and duplicate-free.
     void download(std::vector<std::uint64_t>& keys, std::vector<double>& coeffs) override {
-        compact(0.0);
+        compact(0.0, 64 * W);
         keys.resize(2 * W * base);
         coeffs.resize(base);
         if (base) {
@@ -420,7 +472,9 @@ void Engine::upload(const std::uint64_t* k, const double* c, std::size_t n) {
 void Engine::apply_rot(const std::uint64_t* p, double theta, int maxdegree) {
     impl->e->apply_rot(p, theta, maxdegree);
 }
-void Engine::compact(double mincoeff) { impl->e->compact(mincoeff); }
+double Engine::compact(double mincoeff, int maxdegree) {
+    return impl->e->compact(mincoeff, maxdegree);
+}
 std::size_t Engine::size() const { return impl->e->size(); }
 void Engine::download(std::vector<std::uint64_t>& k, std::vector<double>& c) {
     impl->e->download(k, c);

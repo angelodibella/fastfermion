@@ -264,22 +264,46 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
 }
 
 inline void truncate_sharded(ShardedPoly& shards, int n_threads, ff_float mincoeff, int topk,
-                             int max_xweight, int xtrunc_period, int rot_count) {
+                             int max_xweight, int xtrunc_period, int rot_last, int maxdegree = 128,
+                             int maxdegree_period = 1, int mincoeff_period = 1,
+                             int rot_first = -1) {
+    if (rot_first < 0) rot_first = rot_last;
     if (topk > 0) {
         // Top-K requires a global view — merge, truncate, re-shard
         PauliPolynomial merged = from_sharded(shards);
-        truncate_all(merged, mincoeff, topk, max_xweight, xtrunc_period, rot_count);
+        truncate_all(merged, mincoeff, topk, max_xweight, xtrunc_period, rot_last, maxdegree,
+                     maxdegree_period, mincoeff_period, rot_first);
         shards = to_sharded(merged, n_threads);
         return;
     }
-    // Per-shard truncation (threshold and x-weight are separable)
-#pragma omp parallel num_threads(n_threads)
+    // Per-shard truncation (weight, threshold, and x-weight are separable).
+    // The firing decisions are made once here and the discarded norm is
+    // reduced across shards, so one scheduled event contributes one delta_e
+    // to the certificate and the stats never see a data race.
+    const bool fire_w =
+        maxdegree_period > 1 && period_crossed(rot_first, rot_last, maxdegree_period);
+    const bool fire_tau = mincoeff > 0 && period_crossed(rot_first, rot_last, mincoeff_period);
+    const bool fire_x =
+        max_xweight >= 0 && xtrunc_period > 0 && (rot_last + 1) % xtrunc_period == 0;
+    double disc2 = 0;
+    std::size_t n_terms = 0;
+#pragma omp parallel num_threads(n_threads) reduction(+ : disc2, n_terms)
     {
         int tid = omp_get_thread_num();
         PauliPolynomial tmp;
         tmp.terms = std::move(shards[tid]);
-        truncate_all(tmp, mincoeff, 0, max_xweight, xtrunc_period, rot_count);
+        n_terms += tmp.terms.size();
+        if (fire_w) truncate_weight(tmp, maxdegree);  // before the threshold: delta_e counts
+        if (fire_tau) disc2 += truncate_threshold(tmp, mincoeff);  // only weight-surviving terms
+        if (fire_x) truncate_x_weight(tmp, max_xweight);
         shards[tid] = std::move(tmp.terms);
+    }
+    auto& stats = trunc_stats();
+    stats.peak_terms = std::max(stats.peak_terms, n_terms);
+    if (fire_w) stats.n_w_events++;
+    if (fire_tau) {
+        stats.cert_tau += std::sqrt(disc2);
+        stats.n_tau_events++;
     }
 }
 
@@ -378,7 +402,8 @@ inline PauliPolynomial _gpu_download(gpu::Engine& eng, int words) {
 }
 
 inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPolynomial& a,
-                                          int maxdegree, ff_float mincoeff, bool batched) {
+                                          int maxdegree, ff_float mincoeff, bool batched,
+                                          int maxdegree_period, int mincoeff_period) {
     if (gpu::device_count() == 0) throw_error("gpu backend: no CUDA device available");
     const int words = _gpu_key_words(circuit, a);
     if (words > 2) throw_error("gpu backend supports at most 128 qubits");
@@ -387,29 +412,51 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
     _gpu_upload(eng, a, words);
     std::vector<std::uint64_t> pkey(2 * words);
 
-    // Threshold compaction follows the same cadence as the CPU truncate_all:
-    // once per gate when unbatched, once per commuting batch when batched, so
-    // both backends discard the same terms at the same points. A pure weight
-    // cutoff (mincoeff = 0) needs no scheduled compaction: the weight filter at
-    // emission reads only the Pauli string, never the coefficient, so whether
-    // duplicates have been summed yet cannot change which terms survive. The
-    // retained set is thus independent of the compaction schedule, and
-    // deduplication can be deferred to the engine's capacity budget
-    // (GPU_PLAN.md, D1).
+    // Scheduled truncation follows the same cadence as the CPU truncate_all:
+    // rule firings are decided per gate window (a gate unbatched, a commuting
+    // batch batched) by the same period_crossed test, so both backends discard
+    // the same terms at the same points. A pure weight cutoff at period 1
+    // needs no scheduled compaction: the emission filter reads only the Pauli
+    // string, never the coefficient, so whether duplicates have been summed
+    // yet cannot change which terms survive, and deduplication can be deferred
+    // to the engine's capacity budget (GPU_PLAN.md, D1). A deferred weight
+    // schedule (period > 1) lifts the emission filter and enforces the cutoff
+    // at its events inside compact(), like the threshold.
+    const int emit_deg = (maxdegree_period <= 1) ? maxdegree : ff_ulong::DIGITS;
+    int rot_count = 0;
+    auto& stats = trunc_stats();
+    auto event = [&](int rot_first, int rot_last) {
+        const bool fire_w =
+            maxdegree_period > 1 && period_crossed(rot_first, rot_last, maxdegree_period);
+        const bool fire_tau =
+            mincoeff > 0 && period_crossed(rot_first, rot_last, mincoeff_period);
+        stats.peak_terms = std::max(stats.peak_terms, eng.size());
+        if (!fire_w && !fire_tau) return;
+        const double disc2 = eng.compact(fire_tau ? mincoeff : 0,
+                                         fire_w ? maxdegree : ff_ulong::DIGITS);
+        if (fire_w) stats.n_w_events++;
+        if (fire_tau) {
+            stats.cert_tau += std::sqrt(disc2);
+            stats.n_tau_events++;
+        }
+    };
     auto apply_rots = [&](const std::vector<ROT>& rots) {
         auto rot = [&](const ROT& g) {
             _gpu_flatten_key(g.ps, words, pkey.data());
-            eng.apply_rot(pkey.data(), g.theta, maxdegree);
+            eng.apply_rot(pkey.data(), g.theta, emit_deg);
         };
         if (!batched) {
             for (const auto& g : rots) {
                 rot(g);
-                if (mincoeff > 0) eng.compact(mincoeff);
+                event(rot_count, rot_count);
+                rot_count++;
             }
         } else {
             for (const auto& batch : batch_commuting_gates(rots)) {
+                const int rot_first = rot_count;
                 for (const auto& g : batch) rot(g);
-                if (mincoeff > 0) eng.compact(mincoeff);
+                rot_count += batch.size();
+                event(rot_first, rot_count - 1);
             }
         }
     };
@@ -481,10 +528,22 @@ inline bool gpu_phase_selftest(int n_pairs, std::uint64_t seed) {
 inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a,
                                  int n_threads = 1, int maxdegree = 128, ff_float mincoeff = 0,
                                  int topk = 0, int max_xweight = -1, int xtrunc_period = 1,
+                                 int maxdegree_period = 1, int mincoeff_period = 1,
                                  bool batched = true, const std::string& parallel = "auto") {
 #ifndef FF_OPENMP
     n_threads = 1;
 #endif
+    if (maxdegree_period < 1 || mincoeff_period < 1)
+        throw_error("truncation periods must be >= 1");
+    trunc_stats().reset();  // per-run statistics (certificate, events, peak terms)
+
+    // With a deferred weight schedule (period > 1) the emission filter is
+    // lifted — strings above the cutoff survive between events and may rotate
+    // back below it — and the cutoff is enforced by scheduled truncate_weight
+    // events instead. At period 1 (default) the filter stays at emission and
+    // behavior is bit-for-bit the historical one. ff_ulong::DIGITS (= 128) is
+    // at or above any reachable Pauli weight, so passing it disables a filter.
+    const int emit_deg = (maxdegree_period <= 1) ? maxdegree : ff_ulong::DIGITS;
 
     // Resolve "auto": serial when single-threaded, sharded otherwise
     std::string strategy = parallel;
@@ -493,7 +552,8 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
 #ifdef FF_GPU
         if (topk > 0 || max_xweight >= 0)
             throw_error("gpu backend does not support topk or max_xweight yet");
-        return propagate_gpu_path(circuit, a, maxdegree, mincoeff, batched);
+        return propagate_gpu_path(circuit, a, maxdegree, mincoeff, batched, maxdegree_period,
+                                  mincoeff_period);
 #else
         throw_error("fastfermion was built without GPU support (rebuild with -Dgpu=enabled)");
 #endif
@@ -521,8 +581,9 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                         _apply_clifford_circuit(obs, circuit, i + 1, clifford_begin + 1);
                         pending_clifford = false;
                     }
-                    conjugate(obs, std::get<ROT>(circuit[i]), maxdegree);
-                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count);
+                    conjugate(obs, std::get<ROT>(circuit[i]), emit_deg);
+                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count,
+                                 maxdegree, maxdegree_period, mincoeff_period);
                     rot_count++;
                 }
             }
@@ -531,9 +592,11 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
             auto flush = [&]() {
                 if (rot_buffer.empty()) return;
                 for (const auto& batch : batch_commuting_gates(rot_buffer)) {
-                    for (const auto& gate : batch) conjugate(obs, gate, maxdegree);
+                    const int rot_first = rot_count;
+                    for (const auto& gate : batch) conjugate(obs, gate, emit_deg);
                     rot_count += batch.size();
-                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count - 1);
+                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count - 1,
+                                 maxdegree, maxdegree_period, mincoeff_period, rot_first);
                 }
                 rot_buffer.clear();
             };
@@ -576,8 +639,9 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                         _apply_clifford_circuit(obs, circuit, i + 1, clifford_begin + 1);
                         pending_clifford = false;
                     }
-                    conjugate_omp(obs, std::get<ROT>(circuit[i]), maxdegree, n_threads, snap);
-                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count);
+                    conjugate_omp(obs, std::get<ROT>(circuit[i]), emit_deg, n_threads, snap);
+                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count,
+                                 maxdegree, maxdegree_period, mincoeff_period);
                     rot_count++;
                 }
             }
@@ -586,10 +650,12 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
             auto flush = [&]() {
                 if (rot_buffer.empty()) return;
                 for (const auto& batch : batch_commuting_gates(rot_buffer)) {
+                    const int rot_first = rot_count;
                     for (const auto& gate : batch)
-                        conjugate_omp(obs, gate, maxdegree, n_threads, snap);
+                        conjugate_omp(obs, gate, emit_deg, n_threads, snap);
                     rot_count += batch.size();
-                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count - 1);
+                    truncate_all(obs, mincoeff, topk, max_xweight, xtrunc_period, rot_count - 1,
+                                 maxdegree, maxdegree_period, mincoeff_period, rot_first);
                 }
                 rot_buffer.clear();
             };
@@ -635,9 +701,9 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                         shards = to_sharded(obs, n_threads);
                         pending_clifford = false;
                     }
-                    conjugate_sharded(shards, std::get<ROT>(circuit[i]), maxdegree, n_threads, buf);
+                    conjugate_sharded(shards, std::get<ROT>(circuit[i]), emit_deg, n_threads, buf);
                     truncate_sharded(shards, n_threads, mincoeff, topk, max_xweight, xtrunc_period,
-                                     rot_count);
+                                     rot_count, maxdegree, maxdegree_period, mincoeff_period);
                     rot_count++;
                 }
             }
@@ -646,11 +712,13 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
             auto flush = [&]() {
                 if (rot_buffer.empty()) return;
                 for (const auto& batch : batch_commuting_gates(rot_buffer)) {
+                    const int rot_first = rot_count;
                     for (const auto& gate : batch)
-                        conjugate_sharded(shards, gate, maxdegree, n_threads, buf);
+                        conjugate_sharded(shards, gate, emit_deg, n_threads, buf);
                     rot_count += batch.size();
                     truncate_sharded(shards, n_threads, mincoeff, topk, max_xweight, xtrunc_period,
-                                     rot_count - 1);
+                                     rot_count - 1, maxdegree, maxdegree_period, mincoeff_period,
+                                     rot_first);
                 }
                 rot_buffer.clear();
             };

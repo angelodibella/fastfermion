@@ -395,7 +395,8 @@ void add_pauli_propagation(py::module_& m) {
         [](const pauli_gates::Circuit& circuit,
            const std::variant<PauliString, PauliPolynomial>& observable, int n_threads,
            const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
-           int max_xweight, int xtrunc_period, bool batched, const std::string& parallel) {
+           int max_xweight, int xtrunc_period, int maxdegree_period, int mincoeff_period,
+           bool batched, const std::string& parallel) {
 #ifndef FF_OPENMP
             if (n_threads > 1) {
                 // The GIL is released for the whole call; reacquire to warn.
@@ -410,12 +411,15 @@ void add_pauli_propagation(py::module_& m) {
                                       ? PauliPolynomial(std::get<0>(observable))
                                       : std::get<1>(observable);
             return pauli_gates::propagate(circuit, obs, n_threads, _maxdegree, _mincoeff, topk,
-                                          max_xweight, xtrunc_period, batched, parallel);
+                                          max_xweight, xtrunc_period, maxdegree_period,
+                                          mincoeff_period, batched, parallel);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
         py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
-        py::arg("max_xweight") = -1, py::arg("xtrunc_period") = 1, py::arg("batched") = true,
-        py::arg("parallel") = "auto", py::call_guard<py::gil_scoped_release>(),
+        py::arg("max_xweight") = -1, py::arg("xtrunc_period") = 1,
+        py::arg("maxdegree_period") = 1, py::arg("mincoeff_period") = 1,
+        py::arg("batched") = true, py::arg("parallel") = "auto",
+        py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Pauli propagation (Heisenberg-picture evolution through a circuit).
 
@@ -424,9 +428,34 @@ void add_pauli_propagation(py::module_& m) {
           - "omp": parallel emission, serial hash-map rebuild.
           - "sharded": sharded hash-map with all-parallel merge.
           - "gpu": CUDA sorted-array engine (requires a build with -Dgpu=enabled
-            and a CUDA device; supports maxdegree and mincoeff).
+            and a CUDA device; supports maxdegree, mincoeff, and the periods).
+        maxdegree_period / mincoeff_period schedule the weight cutoff and the
+        coefficient threshold: a period-p rule fires once every p rotation
+        gates. Period 1 (default) is the historical cadence -- the weight
+        cutoff enforced at emission, the threshold at every gate (unbatched)
+        or commuting batch (batched). A weight period > 1 lifts the emission
+        filter and truncates at the scheduled events instead (cuPauliProp-
+        style deferred truncation): strings above the cutoff survive between
+        events and may rotate back, so the retained set genuinely differs and
+        the intermediate term count can exceed the weight-w arena.
+        trunc_stats() reports the run's certificate and event counts.
         Gate batching is on by default. The GIL is released for the whole call.
         )DOC");
+
+    // Per-run truncation statistics (reset at each propagate() entry).
+    // cert_tau = Sum_e delta_e over threshold events: each delta_e is the HS
+    // norm of that event's discards, and the sum bounds the drift from the
+    // weight-only reference for ANY threshold schedule (the schedule
+    // certificate) -- every run ships its own error bound at no extra cost.
+    m.def("trunc_stats", []() {
+        auto& st = pauli_gates::trunc_stats();
+        py::dict d;
+        d["cert_tau"] = st.cert_tau;
+        d["n_tau_events"] = st.n_tau_events;
+        d["n_w_events"] = st.n_w_events;
+        d["peak_terms"] = st.peak_terms;
+        return d;
+    });
 
     // --- per-phase propagation profiling (OMP / sharded) -------------------
     m.def("profile_reset", []() {

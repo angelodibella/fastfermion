@@ -99,3 +99,40 @@ def test_rejects_unsupported():
         ff.propagate(tfim(4, 0.05), ff.PauliString("Z0"), parallel="gpu", topk=10)
     with pytest.raises(Exception):
         ff.propagate(tfim(4, 0.05), ff.PauliString("Z0"), parallel="gpu", max_xweight=2)
+
+# --- truncation schedules (maxdegree_period / mincoeff_period) ---------------
+# GPU and serial CPU must retain identical sets under every schedule: the
+# firing decisions use the same period_crossed test on both sides, and the
+# GPU's scheduled compact() drops exactly what the CPU's truncate_all drops.
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("p_w", [2, 5])
+def test_deferred_weight_schedule(p_w, batched):
+    assert_equal(tfim(8, 0.05), 6, "Z0", maxdegree=3, maxdegree_period=p_w, batched=batched)
+
+
+@pytest.mark.parametrize("p_tau", [3, 7])
+def test_threshold_period(p_tau):
+    assert_equal(tfim(8, 0.05), 6, "Z0", maxdegree=4, mincoeff=1e-6, mincoeff_period=p_tau,
+                 batched=False)
+
+
+def test_combined_schedules():
+    assert_equal(heisenberg(8, 0.05), 6, "Z0", maxdegree=3, maxdegree_period=3, mincoeff=1e-6,
+                 mincoeff_period=2, batched=False)
+
+
+def test_certificate_backend_agreement():
+    # The certificate is accumulated on the host from per-event device
+    # reductions; it must match the CPU value for the same schedule to the
+    # accuracy of a sum of ~1e2 event norms.
+    circ = [g for _ in range(6) for g in tfim(8, 0.05)]
+    obs = ff.PauliString("Z" + "I" * 7)
+    ff.propagate(circ, obs, maxdegree=4, mincoeff=1e-5, mincoeff_period=2, batched=False)
+    cpu = ff.trunc_stats()
+    ff.propagate(circ, obs, maxdegree=4, mincoeff=1e-5, mincoeff_period=2, batched=False,
+                 parallel="gpu")
+    gpu = ff.trunc_stats()
+    assert gpu["n_tau_events"] == cpu["n_tau_events"]
+    assert abs(gpu["cert_tau"] - cpu["cert_tau"]) < 1e-12 * max(1.0, cpu["cert_tau"])

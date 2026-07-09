@@ -54,9 +54,13 @@ class Engine {
     void apply_rot(const std::uint64_t* p_key, double theta, int maxdegree);
 
     // Sort the tail, merge into the base, sum coefficients of equal keys;
-    // then discard |c| <= mincoeff when mincoeff > 0 (the host schedules
-    // this to match the CPU truncation cadence).
-    void compact(double mincoeff);
+    // then discard weight > maxdegree and |c| <= mincoeff where those rules
+    // are active (mincoeff > 0 / maxdegree below the 128-qubit no-op value;
+    // the host schedules both to match the CPU truncation cadence). Returns
+    // the discarded |c|^2 sum of the THRESHOLD rule alone — the squared HS
+    // norm delta_e^2 of the event, feeding the run certificate Sum_e delta_e
+    // — counting only terms the weight rule keeps, and 0 when it is inactive.
+    double compact(double mincoeff, int maxdegree = 256);
 
     std::size_t size() const;  // resident terms (base + uncompacted tail)
 
