@@ -191,3 +191,10 @@ def test_support_key_rejects_ineligible():
     with pytest.raises(Exception):  # site 127 collides with the sentinel
         ff.propagate([ff.ROT("XX", [0, 127], 0.1)], ff.PauliString("Z0"), parallel="gpu",
                      maxdegree=2, gpu_key="support")
+
+
+@pytest.mark.parametrize("beta", [0.0, 0.1, 1.0])
+@pytest.mark.parametrize("key", ["dense", "support"])
+def test_beta_schedule_free(beta, key):
+    # Compaction invariance made a test: the dedup cadence cannot change results.
+    assert_equal(tfim(8, 0.05), 6, "Z0", maxdegree=3, gpu_key=key, gpu_beta=beta)

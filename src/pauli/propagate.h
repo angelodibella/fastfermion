@@ -424,7 +424,8 @@ inline PauliPolynomial _gpu_download(gpu::Engine& eng, int words) {
 inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPolynomial& a,
                                           int maxdegree, ff_float mincoeff, bool batched,
                                           int maxdegree_period, int mincoeff_period,
-                                          long long reserve_terms, const std::string& gpu_key) {
+                                          long long reserve_terms, const std::string& gpu_key,
+                                          double gpu_beta) {
     if (gpu::device_count() == 0) throw_error("gpu backend: no CUDA device available");
     const int words = _gpu_key_words(circuit, a);
     if (words > 2) throw_error("gpu backend supports at most 128 qubits");
@@ -483,7 +484,7 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
         const double arena = _weight_arena(_gpu_extent(circuit, a), maxdegree);
         if (arena < 2e9) reserve = 2 * std::size_t(arena) + 64;
     }
-    gpu::Engine eng(words, a.terms.size(), reserve, reserve_hard, sparse_words);
+    gpu::Engine eng(words, a.terms.size(), reserve, reserve_hard, sparse_words, gpu_beta);
     _gpu_upload(eng, a, words);
     std::vector<std::uint64_t> pkey(2 * words);
 
@@ -604,7 +605,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                                  int maxdegree_period = 1, int mincoeff_period = 1,
                                  bool batched = true, const std::string& parallel = "auto",
                                  long long reserve_terms = -1,
-                                 const std::string& gpu_key = "auto") {
+                                 const std::string& gpu_key = "auto", double gpu_beta = -1) {
 #ifndef FF_OPENMP
     n_threads = 1;
 #endif
@@ -628,7 +629,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
         if (topk > 0 || max_xweight >= 0)
             throw_error("gpu backend does not support topk or max_xweight yet");
         return propagate_gpu_path(circuit, a, maxdegree, mincoeff, batched, maxdegree_period,
-                                  mincoeff_period, reserve_terms, gpu_key);
+                                  mincoeff_period, reserve_terms, gpu_key, gpu_beta);
 #else
         throw_error("fastfermion was built without GPU support (rebuild with -Dgpu=enabled)");
 #endif

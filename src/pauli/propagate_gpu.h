@@ -53,8 +53,11 @@ class Engine {
     // merge are bandwidth-bound so the record size is the cost. Eligibility
     // (emission-enforced cutoff, initial weights within capacity) is the
     // caller's responsibility.
+    // beta: compact when the unsorted tail exceeds beta * base (a plain dedup,
+    // schedule-free by compaction invariance); 0 = per-gate, < 0 = only at
+    // capacity pressure. The batch-length model predicts the optimum.
     Engine(int words, std::size_t capacity_hint, std::size_t reserve_terms = 0,
-           bool reserve_hard = false, int sparse_words = 0);
+           bool reserve_hard = false, int sparse_words = 0, double beta = -1);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;

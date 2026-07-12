@@ -484,7 +484,8 @@ struct ImplBase {
 template <class Ops>
 struct EngineT final : ImplBase {
     using K = typename Ops::KeyT;
-    int words_;  // flat words per Pauli plane at the host seam
+    int words_;      // flat words per Pauli plane at the host seam
+    double beta_;    // tail budget: compact when tail > beta * base (< 0 = capacity-driven)
     // The term array is one allocation split into two regions: a sorted,
     // duplicate-free prefix of length `base`, then an unsorted `tail` of
     // freshly emitted partners. Emission grows the tail; compact() folds the
@@ -522,8 +523,8 @@ struct EngineT final : ImplBase {
     }
 
     EngineT(int words, std::size_t capacity_hint, std::size_t reserve_terms,
-            bool reserve_hard)
-        : words_(words) {
+            bool reserve_hard, double beta)
+        : words_(words), beta_(beta) {
         cuda_check(cudaFree(nullptr), "context init");  // fail early, clearly
         cuda_check(cudaMallocHost(&h_count, sizeof(unsigned)), "pinned alloc");
         cuda_check(cudaMallocHost(&h_nruns, sizeof(int)), "pinned alloc");
@@ -660,6 +661,15 @@ struct EngineT final : ImplBase {
     void apply_rot(const std::uint64_t* p_key, double theta, int maxdegree) override {
         std::size_t n = base + tail;
         if (n == 0) return;
+        // Tail budget: a plain dedup (no threshold, no weight event -- free to
+        // schedule by the compaction-invariance proposition) once the unsorted
+        // tail outgrows beta * base. beta = 0 compacts every gate (the
+        // cuPauliProp-shaped cadence); beta < 0 defers to the capacity check
+        // below. prop:batch-length predicts the optimum beta*.
+        if (beta_ >= 0 && base && double(tail) > beta_ * double(base)) {
+            compact(0.0, 64 * words_);
+            n = base;
+        }
         if (2 * n > cap) {  // worst case every term forks (n -> 2n): tidy first, grow only if still short
             compact(0.0, 64 * words_);
             n = base;
@@ -790,23 +800,23 @@ struct Engine::Impl {
 // Pick the compiled kernel set matching this circuit's key width (see the
 // ImplBase note above).
 Engine::Engine(int words, std::size_t capacity_hint, std::size_t reserve_terms,
-               bool reserve_hard, int sparse_words)
+               bool reserve_hard, int sparse_words, double beta)
     : impl(new Impl) {
     // sparse_words = 0 selects the dense bit-plane key; 1 or 2 selects the
     // support-list key with that many words (7 slots per word). The host
     // driver owns the eligibility rules; here the request is taken as given.
     if (sparse_words == 1)
         impl->e = std::make_unique<EngineT<SparseOps<1>>>(words, capacity_hint, reserve_terms,
-                                                          reserve_hard);
+                                                          reserve_hard, beta);
     else if (sparse_words == 2)
         impl->e = std::make_unique<EngineT<SparseOps<2>>>(words, capacity_hint, reserve_terms,
-                                                          reserve_hard);
+                                                          reserve_hard, beta);
     else if (words == 1)
         impl->e = std::make_unique<EngineT<DenseOps<1>>>(words, capacity_hint, reserve_terms,
-                                                         reserve_hard);
+                                                         reserve_hard, beta);
     else if (words == 2)
         impl->e = std::make_unique<EngineT<DenseOps<2>>>(words, capacity_hint, reserve_terms,
-                                                         reserve_hard);
+                                                         reserve_hard, beta);
     else
         throw std::runtime_error("fastfermion gpu: only 1- or 2-word keys (<=128 qubits)");
 }
