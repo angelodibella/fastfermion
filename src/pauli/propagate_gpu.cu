@@ -664,25 +664,38 @@ struct EngineT final : ImplBase {
         // Tail budget: a plain dedup (no threshold, no weight event -- free to
         // schedule by the compaction-invariance proposition) once the unsorted
         // tail outgrows beta * base. beta = 0 compacts every gate (the
-        // cuPauliProp-shaped cadence); beta < 0 defers to the capacity check
-        // below. prop:batch-length predicts the optimum beta*.
+        // cuPauliProp-shaped cadence); beta < 0 defers to the capacity
+        // handling below. prop:batch-length predicts the optimum beta*.
         if (beta_ >= 0 && base && double(tail) > beta_ * double(base)) {
             compact(0.0, 64 * words_);
             n = base;
         }
-        if (2 * n > cap) {  // worst case every term forks (n -> 2n): tidy first, grow only if still short
-            compact(0.0, 64 * words_);
-            n = base;
-            grow(2 * n);
-        }
         const typename Ops::GateT p = Ops::make_gate(p_key, words_);
         // Deterministic emission (see "--- kernels"): flag terms, reserve one
         // tail slot per surviving partner via the prefix sum, then emit.
-        k_flag<Ops><<<n_blocks(n), BLOCK>>>(ka, n, p, maxdegree, pos);
-        const unsigned emitted = scan_pos(n);
-        k_emit<Ops><<<n_blocks(n), BLOCK>>>(ka, ca, n, p, std::cos(theta), std::sin(theta), pos);
-        cuda_check(cudaGetLastError(), "emission");
-        tail += emitted;
+        // Capacity is judged on the EXACT emission count the scan already
+        // produces (not the every-term-forks worst case, which forced
+        // premature compactions when the anticommuting fraction was small):
+        // if the gate does not fit, tidy and retry -- the flags and slots are
+        // index-bound to the array, so any compact or grow invalidates them
+        // and the loop re-flags. At most two retries (one compact, one grow).
+        for (;;) {
+            k_flag<Ops><<<n_blocks(n), BLOCK>>>(ka, n, p, maxdegree, pos);
+            const unsigned emitted = scan_pos(n);
+            if (n + emitted <= cap) {
+                k_emit<Ops><<<n_blocks(n), BLOCK>>>(ka, ca, n, p, std::cos(theta),
+                                                    std::sin(theta), pos);
+                cuda_check(cudaGetLastError(), "emission");
+                tail += emitted;
+                return;
+            }
+            if (tail) {
+                compact(0.0, 64 * words_);
+                n = base;
+            } else {
+                grow(n + emitted);  // exact: the true requirement is now known
+            }
+        }
     }
 
     // Fold the emitted tail into the base so the whole array is sorted and
