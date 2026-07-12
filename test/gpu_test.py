@@ -198,3 +198,13 @@ def test_support_key_rejects_ineligible():
 def test_beta_schedule_free(beta, key):
     # Compaction invariance made a test: the dedup cadence cannot change results.
     assert_equal(tfim(8, 0.05), 6, "Z0", maxdegree=3, gpu_key=key, gpu_beta=beta)
+
+
+def test_support_key_rejects_wide_axis():
+    # Rebuild-gate F1: SGate holds <= 2 sites; a 3-site rotation axis must be
+    # rejected for the sparse key, not silently truncated to a different gate.
+    g = [ff.ROT("XXX", [0, 1, 2], 0.1)]
+    with pytest.raises(Exception):
+        ff.propagate(g, ff.PauliString("Z0"), parallel="gpu", maxdegree=3, gpu_key="support")
+    # and auto must fall back to dense, agreeing with serial
+    assert_equal(g, 4, ff.PauliString("Z0"), maxdegree=3)

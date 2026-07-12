@@ -206,3 +206,10 @@ def test_backends_agree_on_schedules(kwargs):
     assert set(ds) == set(dh)
     for k in ds:
         assert abs(ds[k] - dh[k]) < 1e-13
+
+
+def test_unknown_parallel_strategy_throws():
+    # Rebuild-gate F2: a typo'd strategy must fail loudly, never return the
+    # un-evolved observable.
+    with pytest.raises(Exception):
+        ff.propagate(circuit(tfim_specs(4)), obs_z(4), n_threads=4, parallel="shard")

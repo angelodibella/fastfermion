@@ -446,8 +446,14 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
         int obs_w = 0;
         for (const auto& [x, c] : a.terms) obs_w = MAX(obs_w, x.degree_total());
         const int need = MAX(maxdegree, obs_w);
-        const bool eligible =
-            maxdegree_period == 1 && _gpu_extent(circuit, a) <= 126 && need <= 14;
+        // The sparse gate holds at most 2 (site, letter) pairs; a wider
+        // rotation axis would be silently TRUNCATED to a different gate
+        // (rebuild-gate finding F1), so eligibility must bound it.
+        int axis_w = 0;
+        for (const auto& g : circuit)
+            if (g.index() == 1) axis_w = MAX(axis_w, std::get<ROT>(g).ps.degree_total());
+        const bool eligible = maxdegree_period == 1 && _gpu_extent(circuit, a) <= 126 &&
+                              need <= 14 && axis_w <= 2;
         if (eligible) {
             const int sw = (need <= 7) ? 1 : 2;
             if (sw < 2 * words) sparse_words = sw;
@@ -455,8 +461,8 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
         if (gpu_key == "support" && sparse_words == 0)
             throw_error(
                 "gpu_key=\"support\" needs an emission-enforced weight cutoff "
-                "(maxdegree_period=1), maxdegree and initial weights <= 14, sites <= 126, "
-                "and a record smaller than the dense key");
+                "(maxdegree_period=1), maxdegree and initial weights <= 14, rotation axes "
+                "on <= 2 sites, sites <= 126, and a record smaller than the dense key");
     }
 
     // Exact-size endgame: with the weight cutoff enforced at emission
@@ -621,8 +627,15 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
     // at or above any reachable Pauli weight, so passing it disables a filter.
     const int emit_deg = (maxdegree_period <= 1) ? maxdegree : ff_ulong::DIGITS;
 
-    // Resolve "auto": serial when single-threaded, sharded otherwise
+    // Resolve "auto": serial when single-threaded, sharded otherwise. An
+    // unknown strategy string must fail HERE: the dispatch below is a chain
+    // of if-blocks, and falling off its end would return the initial
+    // observable un-evolved -- silently (rebuild-gate finding F2).
     std::string strategy = parallel;
+    if (strategy != "auto" && strategy != "serial" && strategy != "omp" &&
+        strategy != "sharded" && strategy != "gpu")
+        throw_error("unknown parallel strategy \"" + parallel +
+                    "\" (use auto, serial, omp, sharded, or gpu)");
     if (strategy == "auto") strategy = (n_threads > 1) ? "sharded" : "serial";
     if (strategy == "gpu") {
 #ifdef FF_GPU
