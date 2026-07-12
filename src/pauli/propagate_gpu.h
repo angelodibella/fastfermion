@@ -33,12 +33,21 @@ int device_count();
 
 // One propagation run: a device-resident term array kept as a sorted,
 // deduplicated base plus an uncompacted tail of freshly emitted partners.
-// Buffers are sized once from capacity_hint and grown geometrically (the
-// trunc_w arena saturates, so growth is rare). words = 64-bit words per
-// Pauli plane: 1 covers <=64 qubits, 2 covers <=128.
+// words = 64-bit words per Pauli plane: 1 covers <=64 qubits, 2 covers <=128.
+//
+// Sizing: reserve_terms > 0 requests a one-shot allocation of that many term
+// slots (the host passes 2x a term-count bound: the weight arena |P_{n,w}| on
+// auto, or the user's expert estimate -- above 2x its base the engine
+// auto-compacts, so growth never fires and the grow-time old+new copy spike
+// cannot occur). With reserve_hard = false the request is best-effort: taken
+// only when it fits comfortably in free device memory, else the engine falls
+// back to capacity_hint and geometric growth (exact-size steps near the
+// memory ceiling). With reserve_hard = true (user-specified sizing) the
+// allocation is attempted as given and fails loudly if it does not fit.
 class Engine {
   public:
-    Engine(int words, std::size_t capacity_hint);
+    Engine(int words, std::size_t capacity_hint, std::size_t reserve_terms = 0,
+           bool reserve_hard = false);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -63,6 +72,11 @@ class Engine {
     double compact(double mincoeff, int maxdegree = 256);
 
     std::size_t size() const;  // resident terms (base + uncompacted tail)
+
+    // High-water mark of the engine's own device allocations (term buffers +
+    // CUB scratch + scalars), counted deterministically at allocation sites --
+    // the run's peak memory metric, independent of what else shares the GPU.
+    std::size_t peak_device_bytes() const;
 
     // Compacts (threshold-free), then copies the term set back to the host.
     void download(std::vector<std::uint64_t>& keys, std::vector<double>& coeffs);

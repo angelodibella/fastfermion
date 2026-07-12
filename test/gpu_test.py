@@ -136,3 +136,26 @@ def test_certificate_backend_agreement():
     gpu = ff.trunc_stats()
     assert gpu["n_tau_events"] == cpu["n_tau_events"]
     assert abs(gpu["cert_tau"] - cpu["cert_tau"]) < 1e-12 * max(1.0, cpu["cert_tau"])
+
+
+def test_peak_device_bytes_reported():
+    # The allocator counter is deterministic: same run, same peak; larger
+    # cutoff, no smaller peak. CPU runs report 0.
+    circ = [g for _ in range(4) for g in tfim(8, 0.05)]
+    obs = ff.PauliString("Z" + "I" * 7)
+    ff.propagate(circ, obs, maxdegree=3, parallel="gpu")
+    a = ff.trunc_stats()["peak_device_bytes"]
+    ff.propagate(circ, obs, maxdegree=3, parallel="gpu")
+    b = ff.trunc_stats()["peak_device_bytes"]
+    ff.propagate(circ, obs, maxdegree=5, parallel="gpu")
+    c = ff.trunc_stats()["peak_device_bytes"]
+    assert a > 0 and a == b and c >= a
+    ff.propagate(circ, obs, maxdegree=3)
+    assert ff.trunc_stats()["peak_device_bytes"] == 0
+
+
+@pytest.mark.parametrize("reserve", [0, 100000])
+def test_reserve_knob_agreement(reserve):
+    # 0 = pure growth path; explicit N = hard preallocation. Both must retain
+    # exactly the auto-reserve run's terms -- sizing policy cannot touch results.
+    assert_equal(tfim(8, 0.05), 6, "Z0", maxdegree=3, reserve_terms=reserve)

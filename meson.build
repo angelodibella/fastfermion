@@ -75,6 +75,17 @@ ffcore = py.extension_module(
   include_directories: ['src', 'src/hashmap'],
   cpp_args: ff_args,
   cuda_args: ff_cuda_args,
+  # Keep the module's dynamic symbol table minimal (pybind11's recommended
+  # posture). gnu_symbol_visibility hides symbols from OUR translation units;
+  # --exclude-libs,ALL additionally hides symbols pulled in from static
+  # archives -- in particular the toolchain's embedded libstdc++, whose
+  # STB_GNU_UNIQUE symbols the dynamic loader otherwise unifies PROCESS-WIDE
+  # with any other libstdc++ in the interpreter (e.g. loaded by another
+  # package's extensions). Two mismatched libstdc++ builds then splice their
+  # internals and crash (observed 2026-07: locale facets, segfault in ostream
+  # double-insertion, triggered by a gcc-libs revision bump).
+  gnu_symbol_visibility: 'hidden',
+  link_args: ['-Wl,--exclude-libs,ALL'],
   install: true,
 )
 

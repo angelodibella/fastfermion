@@ -27,10 +27,12 @@ struct TruncStats {
     double cert_tau = 0;                       // Sum_e ||discard_e|| over threshold events
     long long n_tau_events = 0, n_w_events = 0;  // scheduled rule firings this run
     std::size_t peak_terms = 0;                // high-water term count seen at events
+    std::size_t peak_device_bytes = 0;  // GPU runs: allocator high-water (0 on CPU paths)
     void reset() {
         cert_tau = 0;
         n_tau_events = n_w_events = 0;
         peak_terms = 0;
+        peak_device_bytes = 0;
     }
 };
 inline TruncStats& trunc_stats() {

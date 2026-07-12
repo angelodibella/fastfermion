@@ -396,7 +396,7 @@ void add_pauli_propagation(py::module_& m) {
            const std::variant<PauliString, PauliPolynomial>& observable, int n_threads,
            const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
            int max_xweight, int xtrunc_period, int maxdegree_period, int mincoeff_period,
-           bool batched, const std::string& parallel) {
+           bool batched, const std::string& parallel, long long reserve_terms) {
 #ifndef FF_OPENMP
             if (n_threads > 1) {
                 // The GIL is released for the whole call; reacquire to warn.
@@ -412,13 +412,14 @@ void add_pauli_propagation(py::module_& m) {
                                       : std::get<1>(observable);
             return pauli_gates::propagate(circuit, obs, n_threads, _maxdegree, _mincoeff, topk,
                                           max_xweight, xtrunc_period, maxdegree_period,
-                                          mincoeff_period, batched, parallel);
+                                          mincoeff_period, batched, parallel, reserve_terms);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
         py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         py::arg("max_xweight") = -1, py::arg("xtrunc_period") = 1,
         py::arg("maxdegree_period") = 1, py::arg("mincoeff_period") = 1,
         py::arg("batched") = true, py::arg("parallel") = "auto",
+        py::arg("reserve_terms") = -1,
         py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Pauli propagation (Heisenberg-picture evolution through a circuit).
@@ -439,6 +440,13 @@ void add_pauli_propagation(py::module_& m) {
         events and may rotate back, so the retained set genuinely differs and
         the intermediate term count can exceed the weight-w arena.
         trunc_stats() reports the run's certificate and event counts.
+        reserve_terms sizes the GPU term buffers (ignored on CPU paths):
+        -1 (default) auto -- preallocate from the a-priori weight-arena bound
+        when it fits in free device memory, so buffers never grow mid-run;
+        0 -- no reservation, geometric growth only; N > 0 -- expert sizing,
+        buffers hold 2*N terms (N deduplicated + one gate's worst-case
+        emissions), allocated unconditionally and failing loudly if the
+        device cannot hold it.
         Gate batching is on by default. The GIL is released for the whole call.
         )DOC");
 
@@ -454,6 +462,7 @@ void add_pauli_propagation(py::module_& m) {
         d["n_tau_events"] = st.n_tau_events;
         d["n_w_events"] = st.n_w_events;
         d["peak_terms"] = st.peak_terms;
+        d["peak_device_bytes"] = st.peak_device_bytes;  // GPU runs only; 0 on CPU paths
         return d;
     });
 

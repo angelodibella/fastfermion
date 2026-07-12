@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -230,6 +231,7 @@ struct ImplBase {
     virtual void apply_rot(const std::uint64_t*, double, int) = 0;
     virtual double compact(double, int) = 0;
     virtual std::size_t size() const = 0;
+    virtual std::size_t peak_device_bytes() const = 0;
     virtual void download(std::vector<std::uint64_t>&, std::vector<double>&) = 0;
 };
 
@@ -256,15 +258,47 @@ struct EngineT final : ImplBase {
     unsigned* h_count = nullptr;
     int* h_nruns = nullptr;
     double* h_disc2 = nullptr;
+    // Deterministic allocator accounting: every cudaMalloc/cudaFree the engine
+    // makes updates cur_bytes; peak_bytes is the run's memory metric (a
+    // counter, not a cudaMemGetInfo sample, so repeated runs report
+    // identical numbers regardless of what else shares the device).
+    std::size_t cur_bytes = 0, peak_bytes = 0;
+    void account(std::ptrdiff_t delta) {
+        cur_bytes = std::size_t(std::ptrdiff_t(cur_bytes) + delta);
+        peak_bytes = std::max(peak_bytes, cur_bytes);
+    }
+    // Device bytes for a capacity of c term slots: two key buffers, two
+    // coefficient buffers, one flag/slot buffer.
+    static std::size_t term_bytes(std::size_t c) {
+        return c * (2 * sizeof(Key<W>) + 2 * sizeof(double) + sizeof(unsigned));
+    }
 
-    explicit EngineT(std::size_t capacity_hint) {
+    EngineT(std::size_t capacity_hint, std::size_t reserve_terms, bool reserve_hard) {
         cuda_check(cudaFree(nullptr), "context init");  // fail early, clearly
         cuda_check(cudaMallocHost(&h_count, sizeof(unsigned)), "pinned alloc");
         cuda_check(cudaMallocHost(&h_nruns, sizeof(int)), "pinned alloc");
         cuda_check(cudaMallocHost(&h_disc2, sizeof(double)), "pinned alloc");
         cuda_check(cudaMalloc(&d_nruns, sizeof(int)), "device alloc");
         cuda_check(cudaMalloc(&d_disc2, sizeof(double)), "device alloc");
-        grow(std::max<std::size_t>(4 * capacity_hint, std::size_t(1) << 16));
+        account(sizeof(int) + sizeof(double));
+        // Best-effort (auto) reserve: honored only when it leaves real
+        // headroom -- the term buffers may take at most 70% of free device
+        // memory, the rest covering CUB scratch (O(resident terms)) and other
+        // users of the device; an unhonored request falls back to the growth
+        // path, so correctness never depends on the reservation. A HARD
+        // (user-sized) reserve skips the check: the expert asked for exactly
+        // this, and a loud allocation failure beats a silently ignored size.
+        std::size_t start = std::max<std::size_t>(4 * capacity_hint, std::size_t(1) << 16);
+        if (reserve_terms > start && reserve_terms <= (std::size_t(1) << 31)) {
+            if (reserve_hard) {
+                start = reserve_terms;
+            } else {
+                std::size_t free_b = 0, total_b = 0;
+                cuda_check(cudaMemGetInfo(&free_b, &total_b), "meminfo");
+                if (term_bytes(reserve_terms) <= free_b / 10 * 7) start = reserve_terms;
+            }
+        }
+        grow(start);
     }
     ~EngineT() override {
         cudaFree(ka), cudaFree(kb), cudaFree(ca), cudaFree(cb);
@@ -274,29 +308,49 @@ struct EngineT final : ImplBase {
 
     // Grow the buffers to hold at least `need` terms. Capacity doubles so the
     // total copying over all grows stays proportional to the final size (each
-    // term moves at most twice on average) and grows stay rare. The old and
-    // new allocations coexist during the copy, so a grow transiently needs
-    // both at once -- cheap normally, costly near the memory ceiling.
+    // term moves at most twice on average) and grows stay rare -- but when a
+    // doubling would not fit in free device memory, the step falls back to the
+    // exact `need`, trading future regrows for reachability at the ceiling.
+    // Only the live key/coefficient pair is copied; the scratch set and the
+    // flag buffer hold no live data across a grow, so they are FREED FIRST and
+    // reallocated after. The transient old+new coexistence is thus one
+    // buffer pair, not all five -- the allocation spike that made the largest
+    // runs die in grow() rather than at their true resident size.
     void grow(std::size_t need) {
         if (need <= cap) return;
         std::size_t ncap = std::max(need, 2 * cap);
+        if (need <= (std::size_t(1) << 31) && ncap > need) {
+            std::size_t free_b = 0, total_b = 0;
+            cuda_check(cudaMemGetInfo(&free_b, &total_b), "meminfo");
+            // Freed-first scratch releases term_bytes(cap) minus the live
+            // pair; require the new full set plus the still-held live pair to
+            // fit with ~10% slack, else take the exact step.
+            const std::size_t live = cap * (sizeof(Key<W>) + sizeof(double));
+            if (term_bytes(ncap) + live > free_b / 10 * 9 + term_bytes(cap)) ncap = need;
+        }
         if (ncap > std::size_t(1) << 31)
             throw std::runtime_error("fastfermion gpu: term count exceeds the 2^31 backend limit");
-        Key<W>*nka, *nkb;
-        double *nca, *ncb;
-        unsigned* npos;
+        // Free the dead buffers before allocating their larger replacements.
+        cudaFree(kb), cudaFree(cb), cudaFree(pos);
+        account(-std::ptrdiff_t(cap * (sizeof(Key<W>) + sizeof(double) + sizeof(unsigned))));
+        Key<W>* nka;
+        double* nca;
         cuda_check(cudaMalloc(&nka, ncap * sizeof(Key<W>)), "device alloc (keys)");
-        cuda_check(cudaMalloc(&nkb, ncap * sizeof(Key<W>)), "device alloc (keys)");
         cuda_check(cudaMalloc(&nca, ncap * sizeof(double)), "device alloc (coeffs)");
-        cuda_check(cudaMalloc(&ncb, ncap * sizeof(double)), "device alloc (coeffs)");
-        cuda_check(cudaMalloc(&npos, ncap * sizeof(unsigned)), "device alloc (offsets)");
+        account(ncap * (sizeof(Key<W>) + sizeof(double)));
         std::size_t n = base + tail;
         if (n) {  // only the current buffer holds live data
             cuda_check(cudaMemcpy(nka, ka, n * sizeof(Key<W>), cudaMemcpyDeviceToDevice), "grow");
             cuda_check(cudaMemcpy(nca, ca, n * sizeof(double), cudaMemcpyDeviceToDevice), "grow");
         }
-        cudaFree(ka), cudaFree(kb), cudaFree(ca), cudaFree(cb), cudaFree(pos);
-        ka = nka, kb = nkb, ca = nca, cb = ncb, pos = npos, cap = ncap;
+        cudaFree(ka), cudaFree(ca);
+        account(-std::ptrdiff_t(cap * (sizeof(Key<W>) + sizeof(double))));
+        ka = nka, ca = nca;
+        cuda_check(cudaMalloc(&kb, ncap * sizeof(Key<W>)), "device alloc (keys)");
+        cuda_check(cudaMalloc(&cb, ncap * sizeof(double)), "device alloc (coeffs)");
+        cuda_check(cudaMalloc(&pos, ncap * sizeof(unsigned)), "device alloc (offsets)");
+        account(std::ptrdiff_t(ncap * (sizeof(Key<W>) + sizeof(double) + sizeof(unsigned))));
+        cap = ncap;
     }
 
     // CUB routines need device scratch memory, and their API sizes it like
@@ -310,7 +364,9 @@ struct EngineT final : ImplBase {
     void* cub_tmp(std::size_t bytes) {
         if (bytes > tmp_cap) {
             cudaFree(tmp);
+            account(-std::ptrdiff_t(tmp_cap));
             cuda_check(cudaMalloc(&tmp, bytes), "device alloc (cub workspace)");
+            account(std::ptrdiff_t(bytes));
             tmp_cap = bytes;
         }
         return tmp;
@@ -428,6 +484,8 @@ struct EngineT final : ImplBase {
 
     std::size_t size() const override { return base + tail; }
 
+    std::size_t peak_device_bytes() const override { return peak_bytes; }
+
     // Copy the term set back to the host, compacting first so what leaves the
     // device is sorted and duplicate-free.
     void download(std::vector<std::uint64_t>& keys, std::vector<double>& coeffs) override {
@@ -456,11 +514,13 @@ struct Engine::Impl {
 
 // Pick the compiled kernel set matching this circuit's key width (see the
 // ImplBase note above).
-Engine::Engine(int words, std::size_t capacity_hint) : impl(new Impl) {
+Engine::Engine(int words, std::size_t capacity_hint, std::size_t reserve_terms,
+               bool reserve_hard)
+    : impl(new Impl) {
     if (words == 1)
-        impl->e = std::make_unique<EngineT<1>>(capacity_hint);
+        impl->e = std::make_unique<EngineT<1>>(capacity_hint, reserve_terms, reserve_hard);
     else if (words == 2)
-        impl->e = std::make_unique<EngineT<2>>(capacity_hint);
+        impl->e = std::make_unique<EngineT<2>>(capacity_hint, reserve_terms, reserve_hard);
     else
         throw std::runtime_error("fastfermion gpu: only 1- or 2-word keys (<=128 qubits)");
 }
@@ -472,6 +532,7 @@ void Engine::upload(const std::uint64_t* k, const double* c, std::size_t n) {
 void Engine::apply_rot(const std::uint64_t* p, double theta, int maxdegree) {
     impl->e->apply_rot(p, theta, maxdegree);
 }
+std::size_t Engine::peak_device_bytes() const { return impl->e->peak_device_bytes(); }
 double Engine::compact(double mincoeff, int maxdegree) {
     return impl->e->compact(mincoeff, maxdegree);
 }

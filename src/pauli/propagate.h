@@ -343,9 +343,9 @@ inline std::vector<std::vector<ROT>> batch_commuting_gates(const std::vector<ROT
 // schedule. The engine owns only the device term array.
 // =========================================================================
 
-// Narrowest per-plane word count covering the observable and every gate;
-// XOR closure keeps partners inside it.
-inline int _gpu_key_words(const Circuit& circuit, const PauliPolynomial& a) {
+// Highest qubit index + 1 touched by the observable or any gate; XOR closure
+// keeps partners inside it, so this is the run's true qubit count n.
+inline int _gpu_extent(const Circuit& circuit, const PauliPolynomial& a) {
     int extent = 1;
     for (const auto& [x, c] : a.terms) extent = MAX(extent, x.extent());
     for (const auto& g : circuit) {
@@ -360,7 +360,27 @@ inline int _gpu_key_words(const Circuit& circuit, const PauliPolynomial& a) {
                 std::get<CliffordGate>(g));
         }
     }
-    return (extent + WORD_LENGTH - 1) / WORD_LENGTH;
+    return extent;
+}
+
+// Narrowest per-plane word count covering that extent.
+inline int _gpu_key_words(const Circuit& circuit, const PauliPolynomial& a) {
+    return (_gpu_extent(circuit, a) + WORD_LENGTH - 1) / WORD_LENGTH;
+}
+
+// |P_{n,w}| = sum_{r<=w} C(n,r) 3^r, the a-priori arena bound on the retained
+// set under an emission-enforced weight cutoff. Computed in floating point
+// with a saturation cap: any value past the engine's 2^31 term limit is
+// unusable for preallocation, so precision beyond the cap is irrelevant.
+inline double _weight_arena(int n, int w) {
+    double total = 1.0, binom = 1.0, pow3 = 1.0;
+    for (int r = 1; r <= MIN(w, n); r++) {
+        binom *= double(n - r + 1) / r;
+        pow3 *= 3.0;
+        total += binom * pow3;
+        if (total > 4e9) return 4e9;  // saturated: past any usable capacity
+    }
+    return total;
 }
 
 inline void _gpu_flatten_key(const PauliString& s, int words, std::uint64_t* out) {
@@ -403,12 +423,38 @@ inline PauliPolynomial _gpu_download(gpu::Engine& eng, int words) {
 
 inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPolynomial& a,
                                           int maxdegree, ff_float mincoeff, bool batched,
-                                          int maxdegree_period, int mincoeff_period) {
+                                          int maxdegree_period, int mincoeff_period,
+                                          long long reserve_terms) {
     if (gpu::device_count() == 0) throw_error("gpu backend: no CUDA device available");
     const int words = _gpu_key_words(circuit, a);
     if (words > 2) throw_error("gpu backend supports at most 128 qubits");
 
-    gpu::Engine eng(words, a.terms.size());
+    // Exact-size endgame: with the weight cutoff enforced at emission
+    // (period 1), the deduplicated set never exceeds the arena |P_{n,w}|, and
+    // the engine auto-compacts before any append can pass 2x its base -- so a
+    // one-shot allocation of 2x the arena provably never grows. Growth (and
+    // its transient old+new copy spike, the 10x10 w=7 OOM) is then impossible;
+    // this is the buffers-sized-once persistence principle of the CPU plateau
+    // fix applied to the GPU.
+    //
+    // reserve_terms is the user override: -1 (auto) applies the arena rule as
+    // a best-effort REQUEST -- the engine takes it only when it fits in free
+    // device memory, else falls back to geometric growth; 0 disables any
+    // reservation (pure growth); > 0 is an expert sizing, honored HARD (a
+    // user who knows the reachable term count can allocate for it exactly --
+    // if it does not fit, the allocation fails loudly rather than the request
+    // being silently ignored). A deferred weight schedule (period > 1) has no
+    // a-priori bound between events, so auto reserves nothing there.
+    std::size_t reserve = 0;
+    bool reserve_hard = false;
+    if (reserve_terms > 0) {
+        reserve = 2 * std::size_t(reserve_terms);  // base + one gate's worst-case tail
+        reserve_hard = true;
+    } else if (reserve_terms < 0 && maxdegree_period == 1) {
+        const double arena = _weight_arena(_gpu_extent(circuit, a), maxdegree);
+        if (arena < 2e9) reserve = 2 * std::size_t(arena) + 64;
+    }
+    gpu::Engine eng(words, a.terms.size(), reserve, reserve_hard);
     _gpu_upload(eng, a, words);
     std::vector<std::uint64_t> pkey(2 * words);
 
@@ -488,12 +534,10 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
         }
     }
     flush();
-    if (pending_clifford) {
-        PauliPolynomial obs = _gpu_download(eng, words);
-        _apply_clifford_circuit(obs, circuit, 0, clifford_begin + 1);
-        return obs;
-    }
-    return _gpu_download(eng, words);
+    PauliPolynomial out = _gpu_download(eng, words);  // final compact happens here
+    stats.peak_device_bytes = eng.peak_device_bytes();
+    if (pending_clifford) _apply_clifford_circuit(out, circuit, 0, clifford_begin + 1);
+    return out;
 }
 
 // Random-pair check of the device phase rule against the host oracle
@@ -529,7 +573,8 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                                  int n_threads = 1, int maxdegree = 128, ff_float mincoeff = 0,
                                  int topk = 0, int max_xweight = -1, int xtrunc_period = 1,
                                  int maxdegree_period = 1, int mincoeff_period = 1,
-                                 bool batched = true, const std::string& parallel = "auto") {
+                                 bool batched = true, const std::string& parallel = "auto",
+                                 long long reserve_terms = -1) {
 #ifndef FF_OPENMP
     n_threads = 1;
 #endif
@@ -553,7 +598,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
         if (topk > 0 || max_xweight >= 0)
             throw_error("gpu backend does not support topk or max_xweight yet");
         return propagate_gpu_path(circuit, a, maxdegree, mincoeff, batched, maxdegree_period,
-                                  mincoeff_period);
+                                  mincoeff_period, reserve_terms);
 #else
         throw_error("fastfermion was built without GPU support (rebuild with -Dgpu=enabled)");
 #endif

@@ -7,13 +7,24 @@
 #pragma once
 
 #include <format>  // for std::format
+#include <locale>
+#include <sstream>
 #include <string>
 
 #include "common.h"
 
 namespace fastfermion {
 
-std::string format_float(const ff_float& v) { return (std::stringstream() << v).str(); };
+// Formatted with the classic ("C") locale pinned explicitly rather than the
+// stream default: another library in the process may change the global C++
+// locale at any time, and number formatting (decimal separator, grouping)
+// must not silently follow it. Output is identical to the default "C" locale.
+std::string format_float(const ff_float& v) {
+    std::stringstream ss;
+    ss.imbue(std::locale::classic());
+    ss << v;
+    return ss.str();
+};
 
 std::string format_complex(const ff_complex& z) {
     if (z.imag() == 0) {
