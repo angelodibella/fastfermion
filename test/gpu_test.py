@@ -159,3 +159,35 @@ def test_reserve_knob_agreement(reserve):
     # 0 = pure growth path; explicit N = hard preallocation. Both must retain
     # exactly the auto-reserve run's terms -- sizing policy cannot touch results.
     assert_equal(tfim(8, 0.05), 6, "Z0", maxdegree=3, reserve_terms=reserve)
+
+
+# --- support-list ("sparse") key ---------------------------------------------
+# The key representation must be invisible in the results: identical retained
+# sets and coefficients vs the serial CPU whatever the format.
+
+
+@pytest.mark.parametrize("key", ["dense", "support"])
+@pytest.mark.parametrize("w", [2, 3, 4])
+def test_key_formats_agree(key, w):
+    assert_equal(tfim(10, 0.05), 8, "Z0", maxdegree=w, gpu_key=key)
+
+
+@pytest.mark.parametrize("key", ["dense", "support"])
+def test_key_formats_with_threshold_and_periods(key):
+    assert_equal(heisenberg(8, 0.05), 6, "Z0", maxdegree=4, mincoeff=1e-6,
+                 mincoeff_period=3, batched=False, gpu_key=key)
+
+
+def test_support_key_wide_sites():
+    # sites up to 126 are representable; the win check needs 2-word dense
+    g = [ff.ROT("XX", [0, 100], 0.1), ff.ROT("ZZ", [0, 100], 0.1), ff.ROT("X", [0], 0.1)]
+    assert_equal(g, 5, ff.PauliString("Z0 Z100"), maxdegree=4, gpu_key="support")
+
+
+def test_support_key_rejects_ineligible():
+    with pytest.raises(Exception):  # deferred weight cutoff
+        ff.propagate(tfim(4, 0.05), ff.PauliString("Z" + "I" * 3), parallel="gpu",
+                     maxdegree=2, maxdegree_period=3, gpu_key="support")
+    with pytest.raises(Exception):  # site 127 collides with the sentinel
+        ff.propagate([ff.ROT("XX", [0, 127], 0.1)], ff.PauliString("Z0"), parallel="gpu",
+                     maxdegree=2, gpu_key="support")

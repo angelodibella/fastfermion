@@ -46,8 +46,15 @@ int device_count();
 // allocation is attempted as given and fails loudly if it does not fit.
 class Engine {
   public:
+    // sparse_words selects the key representation: 0 = dense bit-planes
+    // (2*words machine words per term); 1 or 2 = the support-list key with
+    // 7 (site, letter) slots per word -- one word covers weight <= 7 at
+    // n <= 127, a quarter of the dense record at n = 100, and the sort and
+    // merge are bandwidth-bound so the record size is the cost. Eligibility
+    // (emission-enforced cutoff, initial weights within capacity) is the
+    // caller's responsibility.
     Engine(int words, std::size_t capacity_hint, std::size_t reserve_terms = 0,
-           bool reserve_hard = false);
+           bool reserve_hard = false, int sparse_words = 0);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;

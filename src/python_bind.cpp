@@ -396,7 +396,8 @@ void add_pauli_propagation(py::module_& m) {
            const std::variant<PauliString, PauliPolynomial>& observable, int n_threads,
            const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
            int max_xweight, int xtrunc_period, int maxdegree_period, int mincoeff_period,
-           bool batched, const std::string& parallel, long long reserve_terms) {
+           bool batched, const std::string& parallel, long long reserve_terms,
+           const std::string& gpu_key) {
 #ifndef FF_OPENMP
             if (n_threads > 1) {
                 // The GIL is released for the whole call; reacquire to warn.
@@ -412,14 +413,15 @@ void add_pauli_propagation(py::module_& m) {
                                       : std::get<1>(observable);
             return pauli_gates::propagate(circuit, obs, n_threads, _maxdegree, _mincoeff, topk,
                                           max_xweight, xtrunc_period, maxdegree_period,
-                                          mincoeff_period, batched, parallel, reserve_terms);
+                                          mincoeff_period, batched, parallel, reserve_terms,
+                                          gpu_key);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("n_threads") = 1,
         py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(), py::arg("topk") = 0,
         py::arg("max_xweight") = -1, py::arg("xtrunc_period") = 1,
         py::arg("maxdegree_period") = 1, py::arg("mincoeff_period") = 1,
         py::arg("batched") = true, py::arg("parallel") = "auto",
-        py::arg("reserve_terms") = -1,
+        py::arg("reserve_terms") = -1, py::arg("gpu_key") = "auto",
         py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Pauli propagation (Heisenberg-picture evolution through a circuit).
@@ -447,6 +449,12 @@ void add_pauli_propagation(py::module_& m) {
         buffers hold 2*N terms (N deduplicated + one gate's worst-case
         emissions), allocated unconditionally and failing loudly if the
         device cannot hold it.
+        gpu_key picks the GPU term representation: "dense" (2 bits/qubit),
+        "support" (a sorted list of (site, letter) slots, 7 per 64-bit word --
+        one word for weight <= 7 at n <= 126, vs four dense words at n = 100;
+        needs maxdegree_period=1 and cutoff/initial weights <= 14), or "auto"
+        (default: support whenever eligible and smaller than dense). The
+        retained sets are identical either way; only speed and memory differ.
         Gate batching is on by default. The GIL is released for the whole call.
         )DOC");
 

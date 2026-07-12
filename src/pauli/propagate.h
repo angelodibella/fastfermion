@@ -424,10 +424,39 @@ inline PauliPolynomial _gpu_download(gpu::Engine& eng, int words) {
 inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPolynomial& a,
                                           int maxdegree, ff_float mincoeff, bool batched,
                                           int maxdegree_period, int mincoeff_period,
-                                          long long reserve_terms) {
+                                          long long reserve_terms, const std::string& gpu_key) {
     if (gpu::device_count() == 0) throw_error("gpu backend: no CUDA device available");
     const int words = _gpu_key_words(circuit, a);
     if (words > 2) throw_error("gpu backend supports at most 128 qubits");
+
+    // Key representation. The support-list ("sparse") key stores w (site,
+    // letter) slots instead of 2 bits per qubit -- 7 slots per word, so one
+    // word covers weight <= 7 where the dense key ships 2*words words; the
+    // sort/merge pipeline is bandwidth-bound, so the record ratio is the
+    // expected win. It requires (i) the weight cutoff enforced at emission
+    // (period 1 -- deferred schedules grow strings past any slot capacity),
+    // (ii) sites < 127 (site 127 is the empty-slot sentinel), (iii) cutoff
+    // and initial observable within the slot capacity. "auto" picks sparse
+    // whenever eligible and strictly smaller than the dense record.
+    if (gpu_key != "auto" && gpu_key != "dense" && gpu_key != "support")
+        throw_error("gpu_key must be \"auto\", \"dense\", or \"support\"");
+    int sparse_words = 0;
+    if (gpu_key != "dense") {
+        int obs_w = 0;
+        for (const auto& [x, c] : a.terms) obs_w = MAX(obs_w, x.degree_total());
+        const int need = MAX(maxdegree, obs_w);
+        const bool eligible =
+            maxdegree_period == 1 && _gpu_extent(circuit, a) <= 126 && need <= 14;
+        if (eligible) {
+            const int sw = (need <= 7) ? 1 : 2;
+            if (sw < 2 * words) sparse_words = sw;
+        }
+        if (gpu_key == "support" && sparse_words == 0)
+            throw_error(
+                "gpu_key=\"support\" needs an emission-enforced weight cutoff "
+                "(maxdegree_period=1), maxdegree and initial weights <= 14, sites <= 126, "
+                "and a record smaller than the dense key");
+    }
 
     // Exact-size endgame: with the weight cutoff enforced at emission
     // (period 1), the deduplicated set never exceeds the arena |P_{n,w}|, and
@@ -454,7 +483,7 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
         const double arena = _weight_arena(_gpu_extent(circuit, a), maxdegree);
         if (arena < 2e9) reserve = 2 * std::size_t(arena) + 64;
     }
-    gpu::Engine eng(words, a.terms.size(), reserve, reserve_hard);
+    gpu::Engine eng(words, a.terms.size(), reserve, reserve_hard, sparse_words);
     _gpu_upload(eng, a, words);
     std::vector<std::uint64_t> pkey(2 * words);
 
@@ -574,7 +603,8 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                                  int topk = 0, int max_xweight = -1, int xtrunc_period = 1,
                                  int maxdegree_period = 1, int mincoeff_period = 1,
                                  bool batched = true, const std::string& parallel = "auto",
-                                 long long reserve_terms = -1) {
+                                 long long reserve_terms = -1,
+                                 const std::string& gpu_key = "auto") {
 #ifndef FF_OPENMP
     n_threads = 1;
 #endif
@@ -598,7 +628,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
         if (topk > 0 || max_xweight >= 0)
             throw_error("gpu backend does not support topk or max_xweight yet");
         return propagate_gpu_path(circuit, a, maxdegree, mincoeff, batched, maxdegree_period,
-                                  mincoeff_period, reserve_terms);
+                                  mincoeff_period, reserve_terms, gpu_key);
 #else
         throw_error("fastfermion was built without GPU support (rebuild with -Dgpu=enabled)");
 #endif
