@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "majorana_algebra.h"
+#include "majorana/algebra.h"
 #include "matrix.h"
 #include "transforms.h"
 

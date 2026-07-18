@@ -15,10 +15,10 @@
 #include "fermi_sparse.h"
 #include "fockstate.h"
 #include "gen.h"
-#include "majorana_algebra.h"
-#include "majorana_gates.h"
-#include "majorana_propagation.h"
-#include "majorana_sparse.h"
+#include "majorana/algebra.h"
+#include "majorana/gates.h"
+#include "majorana/propagate.h"
+#include "majorana/sparse.h"
 #include "pauli/algebra.h"
 #include "pauli/propagate.h"
 #include "pauli/sparse.h"
@@ -564,30 +564,24 @@ void add_majorana_propagation(py::module_& m) {
         "propagate",
         [](const majorana_gates::MajoranaCircuit& circuit,
            const std::variant<MajoranaString, MajoranaPolynomial>& observable,
-           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff) {
-            ff_float mincoeffval = mincoeff.has_value() ? mincoeff.value() : 0;
-            if (observable.index() == 0) {
-                // MajoranaString
-                if (maxdegree.has_value()) {
-                    return majorana_gates::propagate(circuit,
-                                                     MajoranaPolynomial(std::get<0>(observable)),
-                                                     maxdegree.value(), mincoeffval);
-                } else {
-                    return majorana_gates::propagate(
-                        circuit, MajoranaPolynomial(std::get<0>(observable)), mincoeffval);
-                }
-            } else {
-                // MajoranaPolynomial
-                if (maxdegree.has_value()) {
-                    return majorana_gates::propagate(circuit, std::get<1>(observable),
-                                                     maxdegree.value(), mincoeffval);
-                } else {
-                    return majorana_gates::propagate(circuit, std::get<1>(observable), mincoeffval);
-                }
-            }
+           const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
+           int maxdegree_period, int mincoeff_period, bool batched) {
+            // Knob set mirrors the Pauli propagate one-for-one (minus the
+            // spin-only x-weight pair and, until the parallel/GPU ports land,
+            // n_threads/parallel/reserve/gpu_* -- the serial backend runs the
+            // full truncation schedule and certificate).
+            int _maxdegree = maxdegree.has_value() ? maxdegree.value() : INT_MAX;
+            ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
+            MajoranaPolynomial obs = (observable.index() == 0)
+                                         ? MajoranaPolynomial(std::get<0>(observable))
+                                         : std::get<1>(observable);
+            return majorana_gates::propagate(circuit, obs, _maxdegree, _mincoeff, topk,
+                                             maxdegree_period, mincoeff_period, batched);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(),
-        py::arg("mincoeff") = 0,
+        py::arg("mincoeff") = 0, py::arg("topk") = 0, py::arg("maxdegree_period") = 1,
+        py::arg("mincoeff_period") = 1, py::arg("batched") = true,
+        py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Backpropagates a Majorana polynomial through a Majorana circuit.
         If maxdegree is specified, truncates any term of degree larger than maxdegree.

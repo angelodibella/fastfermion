@@ -132,6 +132,10 @@ inline void conjugate_omp(PauliPolynomial& obs, const ROT& gate, int maxdegree, 
             else {
                 all_kept[tid].emplace_back(ps_q, c * cos_t);
                 PauliMonomial partner = ps * ps_q;
+                // Not redundant: this IS the structural cutoff. At period 1 truncate_all
+                // runs no weight pass, so emission-time rejection here is the only
+                // enforcement (and what keeps the arena bound a priori); the deferred
+                // schedule disables it by passing maxdegree = DIGITS from the driver.
                 if (partner.degree_total() <= maxdegree)
                     all_partners[tid].emplace_back(partner.pauli_string(),
                                                    c * isin_t * partner.coefficient());
@@ -215,6 +219,7 @@ inline void conjugate_sharded(ShardedPoly& shards, const ROT& gate, int maxdegre
         for (auto& [x, coeff] : shard) {
             if (!x.commutes(ps)) {
                 PauliMonomial partner = ps * x;
+                // Needed -- same emission-time enforcement as conjugate_omp above.
                 if (partner.degree_total() <= maxdegree) {
                     auto pk = partner.pauli_string();
                     auto pc = coeff * isin_t * partner.coefficient();

@@ -9,7 +9,7 @@
 #include "bits_utils.h"
 #include "common.h"
 #include "fermi_algebra.h"
-#include "majorana_algebra.h"
+#include "majorana/algebra.h"
 #include "subspaces.h"
 
 namespace fastfermion {
