@@ -208,3 +208,78 @@ def test_support_key_rejects_wide_axis():
         ff.propagate(g, ff.PauliString("Z0"), parallel="gpu", maxdegree=3, gpu_key="support")
     # and auto must fall back to dense, agreeing with serial
     assert_equal(g, 4, ff.PauliString("Z0"), maxdegree=3)
+
+
+# -- Majorana GPU backend ------------------------------------------------------
+# The Majorana index-mask key rides the same engine (sparse_words = -1);
+# these cases mirror the Pauli GPU agreement suite on a spinless t-V chain.
+
+
+def _tv_maj_circuit(M, t, V, dt, steps):
+    gates = []
+    for _ in range(steps):
+        for j in range(M - 1):
+            m = 2 * j + 1
+            gates.append(ff.MROT(ff.MajoranaString([m + 1, m + 2]), 2 * (-t) * 0.5 * dt))
+            gates.append(ff.MROT(ff.MajoranaString([m, m + 3]), 2 * (+t) * 0.5 * dt))
+            if V != 0:
+                gates.append(ff.MROT(ff.MajoranaString([m, m + 1]), 2 * (V / 4) * dt))
+                gates.append(ff.MROT(ff.MajoranaString([m + 2, m + 3]), 2 * (V / 4) * dt))
+                gates.append(
+                    ff.MROT(ff.MajoranaString([m, m + 1, m + 2, m + 3]), 2 * (-V / 4) * dt))
+    return gates
+
+
+def _mdict(p):
+    return {str(k): complex(v) for k, v in p.terms.items()}
+
+
+def _herm_pair(idx):
+    # The self-adjoint observable Gamma_S = i^{m} gamma_S as a polynomial:
+    # the GPU path requires (and asserts) a self-adjoint observable, while
+    # the CPU path accepts any polynomial. deg 2 -> coefficient i.
+    poly = ff.MajoranaPolynomial(ff.MajoranaString(idx))
+    poly *= 1j
+    return poly
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(maxdegree=4),
+    dict(maxdegree=4, mincoeff=1e-6),
+    dict(maxdegree=4, mincoeff=1e-6, mincoeff_period=3, batched=False),
+    dict(maxdegree=4, maxdegree_period=2, batched=False),
+    dict(maxdegree=6, gpu_beta=0.0),
+])
+def test_majorana_gpu_matches_serial(kwargs):
+    circ = _tv_maj_circuit(5, 1.0, 2.0, 0.09, 4)
+    obs = _herm_pair([1, 2])
+    cpu = ff.propagate(circ, obs, parallel="serial", **kwargs)
+    cpu_stats = dict(ff.trunc_stats())
+    gpu = ff.propagate(circ, obs, parallel="gpu", **kwargs)
+    gpu_stats = dict(ff.trunc_stats())
+    dc, dg = _mdict(cpu), _mdict(gpu)
+    assert dc.keys() == dg.keys()
+    assert all(abs(dc[k] - dg[k]) < 1e-12 for k in dc)
+    assert abs(cpu_stats["cert_tau"] - gpu_stats["cert_tau"]) <= 1e-12 * (
+        1 + cpu_stats["cert_tau"])
+
+
+def test_majorana_gpu_free_closure():
+    # V = 0: quadratic gates conserve degree; the cutoff at the observable's
+    # degree is exact on the GPU path too.
+    circ = _tv_maj_circuit(5, 1.0, 0.0, 0.07, 6)
+    obs = _herm_pair([1, 2])
+    full = ff.propagate(circ, obs, parallel="gpu")
+    cut = ff.propagate(circ, obs, parallel="gpu", maxdegree=2)
+    df, dc = _mdict(full), _mdict(cut)
+    assert df.keys() == dc.keys()
+    assert all(abs(df[k] - dc[k]) < 1e-13 for k in df)
+
+
+def test_majorana_gpu_device_bytes_and_rejections():
+    circ = _tv_maj_circuit(4, 1.0, 2.0, 0.1, 3)
+    obs = _herm_pair([1, 2])
+    ff.propagate(circ, obs, parallel="gpu", maxdegree=4)
+    assert ff.trunc_stats()["peak_device_bytes"] > 0
+    with pytest.raises(Exception):
+        ff.propagate(circ, obs, parallel="gpu", gpu_key="support")

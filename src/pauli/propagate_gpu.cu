@@ -276,6 +276,102 @@ struct DenseOps {
     }
 };
 
+// --- Majorana keys -----------------------------------------------------------
+//
+// A Majorana monomial is a subset S of the 2M Majorana indices; its natural
+// key is the index bitmask, stored in the same flat 2*W-word record as the
+// dense Pauli key (one mask of up to 128*W bits; M <= 64*W modes), so the
+// whole compaction pipeline -- sort, merge, reduce, gather, capacity -- is
+// reused byte-for-byte. Degree is the mask popcount, which makes the
+// engine's weight-cutoff machinery the Majorana degree cutoff with no
+// further changes. Coefficients cross the seam as the real coefficients of
+// the HERMITIAN monomials Gamma_S = i^{m(k)} gamma_S (m(k) = k(k-1)/2 mod 2,
+// k = |S|): the host folds the i^{m} phase at upload and unfolds at
+// download, and on device every gate factor is then real, exactly as for
+// Pauli strings.
+
+template <int W>
+__device__ inline int maj_weight(const Key<W>& q) {
+    int w = 0;
+    for (int i = 0; i < 2 * W; i++) w += __popcll(q.v[i]);
+    return w;
+}
+
+// Anticommutation of Gamma_P and Gamma_Q: parity of |P||Q| - |P n Q|.
+template <int W>
+__device__ inline bool maj_anticommutes(const Key<W>& p, const Key<W>& q) {
+    int wp = 0, wq = 0, wi = 0;
+    for (int i = 0; i < 2 * W; i++) {
+        wp += __popcll(p.v[i]);
+        wq += __popcll(q.v[i]);
+        wi += __popcll(p.v[i] & q.v[i]);
+    }
+    return ((wp * wq - wi) & 1) != 0;
+}
+
+// Sign s in i Gamma_P Gamma_Q = s Gamma_{P xor Q}, s in {+-1} for
+// anticommuting pairs: collecting the monomial phases,
+//   s = i^{1 + m(p) + m(q) - m(r) + 2 x(P,Q)},
+// with x(P,Q) the crossing count |{(mu in P, nu in Q) : mu > nu}| of the
+// concatenated factor lists (gamma_P gamma_Q = (-1)^x gamma_{P xor Q}).
+// The gate mask P carries at most a handful of set bits (quadratic and
+// quartic generators), so x is computed by walking P's bits and counting
+// Q's bits below each -- a few popcounts per gate bit, branch-light.
+template <int W>
+__device__ inline double maj_sign(const Key<W>& p, const Key<W>& q, int wp, int wq, int wr) {
+    int x = 0;
+    int base = 0;  // running count of q-bits in words below word i
+    int qbelow[2 * W];
+    for (int i = 0; i < 2 * W; i++) {
+        qbelow[i] = base;
+        base += __popcll(q.v[i]);
+    }
+    for (int i = 0; i < 2 * W; i++) {
+        unsigned long long pw = p.v[i];
+        while (pw) {
+            int b = __ffsll((long long)pw) - 1;  // lowest set bit
+            unsigned long long below = (b == 0) ? 0ull : (q.v[i] & ((1ull << b) - 1ull));
+            x += qbelow[i] + __popcll(below);
+            pw &= pw - 1;
+        }
+    }
+    auto m = [](int k) { return (k * (k - 1) / 2) & 1; };
+    int jp = (1 + m(wp) + m(wq) + 3 * m(wr) + 2 * x) & 3;  // -m == 3m (mod 4)
+    // jp is 0 or 2 for anticommuting pairs (s real); 2 means -1.
+    return (jp & 2) ? -1.0 : 1.0;
+}
+
+template <int W>
+struct MajoranaOps {
+    using KeyT = Key<W>;
+    using GateT = Key<W>;
+    static __device__ bool ac(const GateT& p, const KeyT& q) { return maj_anticommutes(p, q); }
+    static __device__ int pweight(const GateT& p, const KeyT& q) {
+        int w = 0;
+        for (int i = 0; i < 2 * W; i++) w += __popcll(p.v[i] ^ q.v[i]);
+        return w;
+    }
+    static __device__ double partner(const GateT& p, const KeyT& q, KeyT& r) {
+        int wp = 0, wq = 0;
+        for (int i = 0; i < 2 * W; i++) {
+            wp += __popcll(p.v[i]);
+            wq += __popcll(q.v[i]);
+            r.v[i] = p.v[i] ^ q.v[i];
+        }
+        int wr = 0;
+        for (int i = 0; i < 2 * W; i++) wr += __popcll(r.v[i]);
+        return maj_sign(p, q, wp, wq, wr);
+    }
+    static __device__ int weight(const KeyT& q) { return maj_weight(q); }
+    // The mask IS the flat wire format, as for the dense Pauli key.
+    static constexpr bool kFlatNative = true;
+    static GateT make_gate(const std::uint64_t* p_key, int) {
+        GateT p;
+        for (int k = 0; k < 2 * W; k++) p.v[k] = p_key[k];
+        return p;
+    }
+};
+
 template <int S>
 struct SparseOps {
     using KeyT = SKey<S>;
@@ -816,9 +912,17 @@ Engine::Engine(int words, std::size_t capacity_hint, std::size_t reserve_terms,
                bool reserve_hard, int sparse_words, double beta)
     : impl(new Impl) {
     // sparse_words = 0 selects the dense bit-plane key; 1 or 2 selects the
-    // support-list key with that many words (7 slots per word). The host
-    // driver owns the eligibility rules; here the request is taken as given.
-    if (sparse_words == 1)
+    // support-list key with that many words (7 slots per word); -1 selects
+    // the Majorana index-mask key (one flat mask in the 2*words record; the
+    // weight machinery then reads Majorana degree). The host driver owns the
+    // eligibility rules; here the request is taken as given.
+    if (sparse_words == -1 && words == 1)
+        impl->e = std::make_unique<EngineT<MajoranaOps<1>>>(words, capacity_hint, reserve_terms,
+                                                            reserve_hard, beta);
+    else if (sparse_words == -1 && words == 2)
+        impl->e = std::make_unique<EngineT<MajoranaOps<2>>>(words, capacity_hint, reserve_terms,
+                                                            reserve_hard, beta);
+    else if (sparse_words == 1)
         impl->e = std::make_unique<EngineT<SparseOps<1>>>(words, capacity_hint, reserve_terms,
                                                           reserve_hard, beta);
     else if (sparse_words == 2)

@@ -566,7 +566,8 @@ void add_majorana_propagation(py::module_& m) {
            const std::variant<MajoranaString, MajoranaPolynomial>& observable,
            const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
            int maxdegree_period, int mincoeff_period, bool batched, int n_threads,
-           const std::string& parallel) {
+           const std::string& parallel, long long reserve_terms, const std::string& gpu_key,
+           double gpu_beta) {
             // Knob set mirrors the Pauli propagate one-for-one (minus the
             // spin-only x-weight pair and, until the parallel/GPU ports land,
             // n_threads/parallel/reserve/gpu_* -- the serial backend runs the
@@ -578,12 +579,14 @@ void add_majorana_propagation(py::module_& m) {
                                          : std::get<1>(observable);
             return majorana_gates::propagate(circuit, obs, _maxdegree, _mincoeff, topk,
                                              maxdegree_period, mincoeff_period, batched,
-                                             n_threads, parallel);
+                                             n_threads, parallel, reserve_terms, gpu_key,
+                                             gpu_beta);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(),
         py::arg("mincoeff") = 0, py::arg("topk") = 0, py::arg("maxdegree_period") = 1,
         py::arg("mincoeff_period") = 1, py::arg("batched") = true, py::arg("n_threads") = 1,
-        py::arg("parallel") = "auto",
+        py::arg("parallel") = "auto", py::arg("reserve_terms") = -1, py::arg("gpu_key") = "auto",
+        py::arg("gpu_beta") = -1.0,
         py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Backpropagates a Majorana polynomial through a Majorana circuit.

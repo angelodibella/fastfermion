@@ -17,6 +17,10 @@
 #include "majorana/gates.h"
 #include "majorana/truncate.h"
 
+#ifdef FF_GPU
+#include "pauli/propagate_gpu.h"
+#endif
+
 #ifdef FF_OPENMP
 #include <omp.h>
 #endif
@@ -213,6 +217,155 @@ inline void truncate_sharded(ShardedMajPoly& shards, int n_threads, ff_float min
 
 #endif  // FF_OPENMP
 
+#ifdef FF_GPU
+// =========================================================================
+// GPU path. The Majorana monomial's index mask rides the engine's flat
+// 2*words record unchanged (sparse_words = -1 selects the Majorana algebra
+// on device; degree = mask popcount, so the engine's weight machinery is the
+// degree cutoff). Coefficients cross as the real coefficients of the
+// Hermitian monomials Gamma_S = i^{m(k)} gamma_S: fold i^{-m} at upload,
+// unfold at download. Scheduling and the certificate follow the CPU cadence
+// exactly, as on the Pauli side.
+// =========================================================================
+
+inline int _gpu_maj_words(const MajoranaCircuit& circuit, const MajoranaPolynomial& a) {
+    int maxidx = 1;
+    for (const auto& [x, c] : a.terms) maxidx = std::max(maxidx, x.extent());
+    for (const auto& g : circuit) maxidx = std::max(maxidx, g.ms.extent());
+    return (maxidx + 2 * WORD_LENGTH - 1) / (2 * WORD_LENGTH);  // record = 2*words u64
+}
+
+inline void _gpu_maj_flatten(const MajoranaString& ms, int words, std::uint64_t* out) {
+    for (int k = 0; k < 2 * words; k++)
+        out[k] = (k < (int)ms.alpha.words.size()) ? ms.alpha.words[k] : 0;
+}
+
+inline int _maj_mphase(int k) { return (k * (k - 1) / 2) & 1; }  // m(k)
+
+// Saturating degree arena Sum_{k<=d} C(2M, k); the a-priori retained-set
+// bound of the emission-enforced degree cutoff.
+inline double _degree_arena(int n_idx, int d) {
+    double total = 0, c = 1;
+    for (int k = 0; k <= std::min(d, n_idx); k++) {
+        total += c;
+        if (total > 4e9) return 4e9;
+        c = c * (n_idx - k) / (k + 1);
+    }
+    return total;
+}
+
+inline MajoranaPolynomial propagate_gpu_path(const MajoranaCircuit& circuit,
+                                             const MajoranaPolynomial& a, int maxdegree,
+                                             ff_float mincoeff, bool batched, int maxdegree_period,
+                                             int mincoeff_period, long long reserve_terms,
+                                             const std::string& gpu_key, double gpu_beta) {
+    if (pauli_gates::gpu::device_count() == 0)
+        throw_error("gpu backend: no CUDA device available");
+    if (gpu_key != "auto" && gpu_key != "dense")
+        throw_error("majorana gpu: gpu_key must be \"auto\" or \"dense\" (the support-list "
+                    "key is not implemented for the Majorana algebra)");
+    const int words = _gpu_maj_words(circuit, a);
+    if (words > 2) throw_error("majorana gpu backend supports at most 128 modes");
+
+    // One-shot arena reservation exactly as on the Pauli side: 2x the a-priori
+    // bound never grows (auto, best-effort), expert sizing is honored hard,
+    // and a deferred degree schedule has no bound so auto reserves nothing.
+    std::size_t reserve = 0;
+    bool reserve_hard = false;
+    if (reserve_terms > 0) {
+        reserve = 2 * std::size_t(reserve_terms);
+        reserve_hard = true;
+    } else if (reserve_terms < 0 && maxdegree_period == 1) {
+        int n_idx = 0;
+        for (const auto& g : circuit) n_idx = std::max(n_idx, g.ms.extent());
+        for (const auto& [x, c] : a.terms) n_idx = std::max(n_idx, x.extent());
+        const double arena = _degree_arena(n_idx, maxdegree);
+        if (arena < 2e9) reserve = 2 * std::size_t(arena) + 64;
+    }
+    pauli_gates::gpu::Engine eng(words, a.terms.size(), reserve, reserve_hard,
+                                 /*sparse_words=*/-1, gpu_beta);
+
+    // Upload: real Hermitian-monomial coefficients (fold i^{-m(k)}).
+    {
+        std::vector<std::uint64_t> keys(2 * std::size_t(words) * a.terms.size());
+        std::vector<double> coeffs(a.terms.size());
+        std::size_t i = 0;
+        for (const auto& [x, c] : a.terms) {
+            _gpu_maj_flatten(x, words, &keys[2 * std::size_t(words) * i]);
+            const ff_complex h = _maj_mphase(x.degree()) ? c * ff_complex(0, -1) : c;
+            if (std::abs(h.imag()) > 1e-12 * (1 + std::abs(h.real())))
+                throw_error("majorana gpu: observable is not self-adjoint");
+            coeffs[i++] = h.real();
+        }
+        eng.upload(keys.data(), coeffs.data(), a.terms.size());
+    }
+
+    const int emit_deg = (maxdegree_period <= 1) ? maxdegree : 4 * WORD_LENGTH;
+    int rot_count = 0;
+    auto& stats = trunc_stats();
+    auto event = [&](int rot_first, int rot_last) {
+        const bool fire_w =
+            maxdegree_period > 1 && period_crossed(rot_first, rot_last, maxdegree_period);
+        const bool fire_tau = mincoeff > 0 && period_crossed(rot_first, rot_last, mincoeff_period);
+        stats.peak_terms = std::max(stats.peak_terms, eng.size());
+        if (!fire_w && !fire_tau) return;
+        const double disc2 =
+            eng.compact(fire_tau ? mincoeff : 0, fire_w ? maxdegree : 4 * WORD_LENGTH);
+        if (fire_w) stats.n_w_events++;
+        if (fire_tau) {
+            stats.cert_tau += std::sqrt(disc2);
+            stats.n_tau_events++;
+        }
+    };
+
+    std::vector<std::uint64_t> pkey(2 * words);
+    auto rot = [&](const MROT& g) {
+        _gpu_maj_flatten(g.ms, words, pkey.data());
+        eng.apply_rot(pkey.data(), g.theta, emit_deg);
+    };
+    int i = (int)circuit.size() - 1;
+    while (i >= 0) {
+        const int first = rot_count;
+        int j = i;
+        if (batched) {
+            std::vector<const MROT*> batch{&circuit[i]};
+            int k = i - 1;
+            while (k >= 0 && _commutes_with_batch(batch, circuit[k])) {
+                batch.push_back(&circuit[k]);
+                k--;
+            }
+            j = k + 1;
+        }
+        for (int g = i; g >= j; g--) {
+            rot(circuit[g]);
+            rot_count++;
+        }
+        i = j - 1;
+        event(first, rot_count - 1);
+    }
+    stats.peak_device_bytes = std::max(stats.peak_device_bytes, eng.peak_device_bytes());
+
+    // Download: unfold the i^{m(k)} phase back onto gamma_S coefficients.
+    MajoranaPolynomial out;
+    {
+        std::vector<std::uint64_t> keys;
+        std::vector<double> coeffs;
+        eng.download(keys, coeffs);
+        const std::size_t n = coeffs.size();
+        for (std::size_t t = 0; t < n; t++) {
+            MajoranaString ms;
+            for (int k = 0; k < 2 * words && k < (int)ms.alpha.words.size(); k++)
+                ms.alpha.words[k] = keys[2 * std::size_t(words) * t + k];
+            const ff_complex c = _maj_mphase(ms.degree())
+                                     ? ff_complex(0, 1) * coeffs[t]
+                                     : ff_complex(coeffs[t], 0);
+            if (coeffs[t] != 0) out.terms[ms] += c;
+        }
+    }
+    return out;
+}
+#endif  // FF_GPU
+
 // =========================================================================
 // Driver. Gate windows (one gate unbatched, one commuting batch batched)
 // advance in Heisenberg order; the emission filter enforces the structural
@@ -226,7 +379,9 @@ inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const Majora
                                     int maxdegree = INT_MAX, ff_float mincoeff = 0, int topk = 0,
                                     int maxdegree_period = 1, int mincoeff_period = 1,
                                     bool batched = true, int n_threads = 1,
-                                    const std::string& parallel = "auto") {
+                                    const std::string& parallel = "auto",
+                                    long long reserve_terms = -1,
+                                    const std::string& gpu_key = "auto", double gpu_beta = -1.0) {
     Backend be;
     if (parallel == "auto")
         be = (n_threads > 1) ? Backend::sharded : Backend::serial;
@@ -236,9 +391,17 @@ inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const Majora
         be = Backend::omp;
     else if (parallel == "sharded")
         be = Backend::sharded;
-    else
-        throw_error("unknown parallel strategy '" << parallel
-                                                  << "' (valid: auto, serial, serial-merge, sharded)");
+    else if (parallel == "gpu") {
+#ifdef FF_GPU
+        trunc_stats().reset();
+        return propagate_gpu_path(circuit, obs, maxdegree, mincoeff, batched, maxdegree_period,
+                                  mincoeff_period, reserve_terms, gpu_key, gpu_beta);
+#else
+        throw_error("gpu backend requested but fastfermion was built without -Dgpu=enabled");
+#endif
+    } else
+        throw_error("unknown parallel strategy '"
+                    << parallel << "' (valid: auto, serial, serial-merge, sharded, gpu)");
 #ifndef FF_OPENMP
     be = Backend::serial;
 #endif
@@ -307,6 +470,9 @@ inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const Majora
 #endif
     return ret;
 }
+
+
+
 
 // Back-compatible overloads (the pre-port public surface).
 inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const MajoranaPolynomial& obs,
