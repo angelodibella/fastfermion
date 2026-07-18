@@ -24,8 +24,8 @@ namespace fastfermion {
 // the norm of the terms discarded at event e (basis elements are
 // orthonormal, so delta_e = sqrt of the discarded |c|^2 sum), and the sum
 // bounds the drift from the structural-rule-only reference for ANY threshold
-// schedule (workbook cor:schedule-certificate; Majorana transfer per
-// rem:keyed-systems). Written only from the driver thread; parallel backends
+// schedule (the truncated gate map is an isometry followed by an orthogonal
+// projection, so per-event discards accumulate additively). Written only from the driver thread; parallel backends
 // reduce their per-shard discards first.
 // =========================================================================
 struct TruncStats {

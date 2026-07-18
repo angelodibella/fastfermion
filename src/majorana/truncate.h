@@ -21,7 +21,7 @@ using fastfermion::truncate_threshold;
 using fastfermion::truncate_top_k;
 
 // Discard terms whose Majorana degree (number of factors) exceeds maxdegree
-// -- the structural cutoff trunc_d (workbook sec:majorana-transition). Only
+// -- the structural cutoff, whose retained set is fixed a priori. Only
 // used by the deferred schedule (maxdegree_period > 1); at period 1 the
 // emission filter in MROT::apply_inplace enforces the cutoff and this pass
 // never runs.

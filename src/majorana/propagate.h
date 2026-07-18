@@ -1,11 +1,12 @@
 // Sparse Majorana dynamics: Heisenberg propagation of a MajoranaPolynomial
 // through a circuit of Majorana rotations, with the same truncation rules,
 // schedules, per-run certificate, and parallel backends as the Pauli driver
-// (pauli/propagate.h) -- the transfer is licensed by workbook
-// rem:keyed-systems: monomials are a keyed orthonormal basis, gates act
-// entrywise and isometrically, and the structural cutoff reads only the key.
-// Backends: serial (hash map), omp (parallel emission, serial merge -- the
-// diagnostic baseline), sharded (key-ownership shards, all-parallel merge).
+// (pauli/propagate.h). The transfer is exact: monomials are a keyed
+// orthonormal basis, gates act entrywise and isometrically, and the
+// structural cutoff reads only the key, so every rule/schedule/certificate
+// argument goes through unchanged. Backends: serial (hash map), serial-merge
+// (parallel emission, single-threaded rebuild -- the diagnostic baseline),
+// sharded (key-ownership shards, all-parallel merge).
 // The GPU engine port follows separately through the key-policy seam.
 
 #pragma once
@@ -55,9 +56,9 @@ struct GateConsts {
 
 // =========================================================================
 // Per-gate conjugation: parallel emission, serial hash-map rebuild.
-// Kept as the measured baseline showing why the merge must be partitioned
-// (workbook sec:merge-profile); the sharded backend below is the production
-// parallel path, exactly as on the Pauli side.
+// Kept as the measured baseline showing why the merge must be partitioned:
+// its rebuild is single-threaded, a floor no thread count clears. The
+// sharded backend below is the production parallel path.
 // =========================================================================
 inline void conjugate_omp(MajoranaPolynomial& obs, const MROT& gate, int maxdegree, int n_threads,
                           std::vector<std::pair<MajoranaString, ff_complex>>& snap) {
@@ -100,8 +101,9 @@ inline void conjugate_omp(MajoranaPolynomial& obs, const MROT& gate, int maxdegr
 // Per-gate conjugation: sharded hash map (all-parallel merge). The
 // polynomial is partitioned into n_threads shards by hashing the monomial
 // key; each thread owns one shard, partners route to their owner through
-// persistent buffers (allocated once per propagation -- the transient-grid
-// lesson of workbook sec:h2d-plateau), and no thread writes another's shard.
+// persistent buffers (allocated once per propagation; rebuilding the t*t
+// grid per gate is a measured t^2 scaling ceiling), and no thread writes
+// another's shard.
 // =========================================================================
 using ShardedMajPoly = std::vector<MajMap>;
 using MajSendBuf = std::vector<std::pair<MajoranaString, ff_complex>>;
@@ -230,13 +232,13 @@ inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const Majora
         be = (n_threads > 1) ? Backend::sharded : Backend::serial;
     else if (parallel == "serial")
         be = Backend::serial;
-    else if (parallel == "omp")
+    else if (parallel == "serial-merge")
         be = Backend::omp;
     else if (parallel == "sharded")
         be = Backend::sharded;
     else
         throw_error("unknown parallel strategy '" << parallel
-                                                  << "' (valid: auto, serial, omp, sharded)");
+                                                  << "' (valid: auto, serial, serial-merge, sharded)");
 #ifndef FF_OPENMP
     be = Backend::serial;
 #endif

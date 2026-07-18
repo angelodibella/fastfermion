@@ -1,7 +1,7 @@
-"""Majorana propagation tests: the workbook sec:majorana-transition gates plus
+"""Majorana propagation tests: structural validation gates plus
 schedule/certificate semantics, mirroring scheduling_test.py on the spin side.
 
-Gates (workbook 7.5): (i) free closure -- a quadratic (hopping-only) circuit
+Structural gates: (i) free closure -- a quadratic (hopping-only) circuit
 conserves degree, so any cutoff at or above the observable's degree is exact;
 (ii) parity conservation -- an even observable stays even; (iii) Jordan-Wigner
 cross-validation -- the Majorana path agrees with the validated Pauli path on
@@ -18,11 +18,11 @@ import fastfermion as ff
 
 
 # -- circuit builders ----------------------------------------------------------
-# t-V chain per workbook eq:tV-chain in the Majorana dictionary (7.4):
+# spinless t-V chain in the Majorana dictionary:
 # hopping (j,j+1) -> (t/1)*[ +1/2 G_{2j+2,2j+3} - 1/2 G_{2j+1,2j+4} ] with the
 # -t coupling folded in; interaction V n_j n_{j+1} -> quartic coupling -V/4
 # (plus quadratic pieces +V/4 on each pair monomial and a constant, dropped).
-# Gate angle theta = 2 h dt for a term h*Gamma (workbook 7.4 Trotterization);
+# Gate angle theta = 2 h dt for a Hamiltonian term h*Gamma;
 # MROT(ms, theta) applies e^{-i theta/2 M}.
 
 
@@ -56,7 +56,7 @@ def poly_dict(p):
 
 @pytest.mark.parametrize("deg", [2, 4])
 def test_free_closure(deg):
-    # V = 0: quadratic gates conserve degree (workbook prop:degree-transport),
+    # V = 0: quadratic gates conserve degree (|P triangle Q| = q when |P|=2),
     # so a cutoff at the observable's degree discards nothing.
     M = 5
     circ = tv_circuit(M, 1.0, 0.0, 0.07, 6)
@@ -140,7 +140,7 @@ def test_jw_cross_validation():
 
 def test_fock_readout_phase():
     # <b| Gamma_S |b> = (-1)^{p(p-1)/2} prod (-1)^{b_j} for paired S
-    # (workbook prop:fock-readout), 0 for unpaired S. Checked against the
+    # (paired-sector readout identity), 0 for unpaired S. Checked against the
     # dense matrix via the fork's own sparse/JW machinery if available,
     # otherwise against the analytic form through number-operator algebra.
     import numpy as np
@@ -240,10 +240,10 @@ def test_backends_agree_on_schedules(kwargs):
     circ = tv_circuit(M, 1.0, 2.0, 0.09, 5)
     obs = ff.MajoranaString([1, 2])
     serial = ff.propagate(circ, obs, batched=False, **kwargs)
-    omp = ff.propagate(circ, obs, batched=False, n_threads=4, parallel="omp", **kwargs)
+    sm = ff.propagate(circ, obs, batched=False, n_threads=4, parallel="serial-merge", **kwargs)
     shard = ff.propagate(circ, obs, batched=False, n_threads=4, parallel="sharded", **kwargs)
     ds = poly_dict(serial)
-    for other in (omp, shard):
+    for other in (sm, shard):
         do = poly_dict(other)
         assert ds.keys() == do.keys()
         assert all(abs(ds[k] - do[k]) < 1e-13 for k in ds)
