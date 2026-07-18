@@ -223,3 +223,34 @@ def test_stats_reset_per_run():
     ff.propagate(circ, obs, maxdegree=4)
     s = ff.trunc_stats()
     assert s["n_tau_events"] == 0 and s["cert_tau"] == 0
+
+
+# -- parallel backends ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(maxdegree=4),
+    dict(maxdegree=4, mincoeff=1e-5, mincoeff_period=3),
+    dict(maxdegree=4, maxdegree_period=2, mincoeff=1e-5),
+])
+def test_backends_agree_on_schedules(kwargs):
+    if not ff.has_openmp:
+        pytest.skip("no OpenMP")
+    M = 5
+    circ = tv_circuit(M, 1.0, 2.0, 0.09, 5)
+    obs = ff.MajoranaString([1, 2])
+    serial = ff.propagate(circ, obs, batched=False, **kwargs)
+    omp = ff.propagate(circ, obs, batched=False, n_threads=4, parallel="omp", **kwargs)
+    shard = ff.propagate(circ, obs, batched=False, n_threads=4, parallel="sharded", **kwargs)
+    ds = poly_dict(serial)
+    for other in (omp, shard):
+        do = poly_dict(other)
+        assert ds.keys() == do.keys()
+        assert all(abs(ds[k] - do[k]) < 1e-13 for k in ds)
+
+
+def test_unknown_parallel_strategy_throws():
+    # A typo'd strategy must fail loudly, never return the initial observable.
+    with pytest.raises(Exception):
+        ff.propagate(tv_circuit(3, 1.0, 1.0, 0.1, 2), ff.MajoranaString([1, 2]),
+                     n_threads=4, parallel="shard")
