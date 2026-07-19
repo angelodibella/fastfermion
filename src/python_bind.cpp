@@ -422,7 +422,7 @@ void add_pauli_propagation(py::module_& m) {
         py::arg("maxdegree_period") = 1, py::arg("mincoeff_period") = 1,
         py::arg("batched") = true, py::arg("parallel") = "auto",
         py::arg("reserve_terms") = -1, py::arg("gpu_key") = "auto",
-        py::arg("gpu_beta") = -1.0,
+        py::arg("gpu_beta") = 0.35,
         py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Pauli propagation (Heisenberg-picture evolution through a circuit).
@@ -458,8 +458,10 @@ void add_pauli_propagation(py::module_& m) {
         retained sets are identical either way; only speed and memory differ.
         gpu_beta sets the GPU deduplication cadence: compact once the unmerged
         tail exceeds gpu_beta * (deduplicated size). 0 compacts every gate;
-        -1 (default) defers to capacity pressure. Schedule-free for results
-        (compaction invariance); a pure speed/memory trade.
+        -1 defers to capacity pressure. The default 0.35 is the measured
+        within-instance optimum of the evidence matrix (plateau 0.25-1).
+        Schedule-free for results (compaction invariance); a pure
+        speed/memory trade.
         Gate batching is on by default. The GIL is released for the whole call.
         )DOC");
 
@@ -567,11 +569,11 @@ void add_majorana_propagation(py::module_& m) {
            const std::optional<int>& maxdegree, const std::optional<ff_float>& mincoeff, int topk,
            int maxdegree_period, int mincoeff_period, bool batched, int n_threads,
            const std::string& parallel, long long reserve_terms, const std::string& gpu_key,
-           double gpu_beta) {
-            // Knob set mirrors the Pauli propagate one-for-one (minus the
-            // spin-only x-weight pair and, until the parallel/GPU ports land,
-            // n_threads/parallel/reserve/gpu_* -- the serial backend runs the
-            // full truncation schedule and certificate).
+           double gpu_beta, int max_unpaired, int unpaired_period) {
+            // Knob set mirrors the Pauli propagate one-for-one; the
+            // max_unpaired/unpaired_period pair is the fermionic analogue of
+            // the spin side's max_xweight/xtrunc_period (unpaired count =
+            // x-weight of the Jordan-Wigner image).
             int _maxdegree = maxdegree.has_value() ? maxdegree.value() : INT_MAX;
             ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
             MajoranaPolynomial obs = (observable.index() == 0)
@@ -580,17 +582,20 @@ void add_majorana_propagation(py::module_& m) {
             return majorana_gates::propagate(circuit, obs, _maxdegree, _mincoeff, topk,
                                              maxdegree_period, mincoeff_period, batched,
                                              n_threads, parallel, reserve_terms, gpu_key,
-                                             gpu_beta);
+                                             gpu_beta, max_unpaired, unpaired_period);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(),
         py::arg("mincoeff") = 0, py::arg("topk") = 0, py::arg("maxdegree_period") = 1,
         py::arg("mincoeff_period") = 1, py::arg("batched") = true, py::arg("n_threads") = 1,
         py::arg("parallel") = "auto", py::arg("reserve_terms") = -1, py::arg("gpu_key") = "auto",
-        py::arg("gpu_beta") = -1.0,
+        py::arg("gpu_beta") = 0.35, py::arg("max_unpaired") = -1, py::arg("unpaired_period") = 1,
         py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Backpropagates a Majorana polynomial through a Majorana circuit.
         If maxdegree is specified, truncates any term of degree larger than maxdegree.
+        max_unpaired discards terms with more unpaired modes than the bound
+        (the analogue of the Pauli side's max_xweight; CPU backends only),
+        fired every unpaired_period rotation gates.
 
         Examples:
         >>> from fastfermion import MROT, propagate
@@ -889,6 +894,7 @@ PYBIND11_MODULE(ffcore, m) {
             .def(py::init<const std::vector<int>&>())
             .def("extent", &MajoranaString::extent)
             .def("degree", &MajoranaString::degree)
+            .def("unpaired", &MajoranaString::unpaired)
             .def("indices", &MajoranaString::support_set)
             .def("is_hermitian", &MajoranaString::is_hermitian)
             .def("commutes",

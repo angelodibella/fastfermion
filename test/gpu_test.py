@@ -283,3 +283,5 @@ def test_majorana_gpu_device_bytes_and_rejections():
     assert ff.trunc_stats()["peak_device_bytes"] > 0
     with pytest.raises(Exception):
         ff.propagate(circ, obs, parallel="gpu", gpu_key="support")
+    with pytest.raises(Exception):
+        ff.propagate(circ, obs, parallel="gpu", max_unpaired=2)

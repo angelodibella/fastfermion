@@ -182,17 +182,20 @@ inline void conjugate_sharded(ShardedMajPoly& shards, const MROT& gate, int maxd
 // merge, truncate, re-shard, as on the Pauli side.
 inline void truncate_sharded(ShardedMajPoly& shards, int n_threads, ff_float mincoeff, int topk,
                              int rot_last, int maxdegree = INT_MAX, int maxdegree_period = 1,
-                             int mincoeff_period = 1, int rot_first = -1) {
+                             int mincoeff_period = 1, int rot_first = -1, int max_unpaired = -1,
+                             int unpaired_period = 1) {
     if (rot_first < 0) rot_first = rot_last;
     if (topk > 0) {
         MajoranaPolynomial merged = from_sharded(shards);
         truncate_all(merged, mincoeff, topk, rot_last, maxdegree, maxdegree_period,
-                     mincoeff_period, rot_first);
+                     mincoeff_period, rot_first, max_unpaired, unpaired_period);
         shards = to_sharded(merged, n_threads);
         return;
     }
     const bool fire_w =
         maxdegree_period > 1 && period_crossed(rot_first, rot_last, maxdegree_period);
+    const bool fire_u =
+        max_unpaired >= 0 && period_crossed(rot_first, rot_last, unpaired_period);
     const bool fire_tau = mincoeff > 0 && period_crossed(rot_first, rot_last, mincoeff_period);
     double disc2 = 0;
     std::size_t n_terms = 0;
@@ -202,8 +205,9 @@ inline void truncate_sharded(ShardedMajPoly& shards, int n_threads, ff_float min
         MajoranaPolynomial tmp;
         tmp.terms = std::move(shards[tid]);
         n_terms += tmp.terms.size();
-        if (fire_w) truncate_degree(tmp, maxdegree);  // before the threshold: delta_e
-        if (fire_tau) disc2 += truncate_threshold(tmp, mincoeff);  // counts survivors only
+        if (fire_w) truncate_degree(tmp, maxdegree);  // key rules first: delta_e
+        if (fire_u) truncate_unpaired(tmp, max_unpaired);  // counts survivors only
+        if (fire_tau) disc2 += truncate_threshold(tmp, mincoeff);
         shards[tid] = std::move(tmp.terms);
     }
     auto& stats = trunc_stats();
@@ -381,7 +385,8 @@ inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const Majora
                                     bool batched = true, int n_threads = 1,
                                     const std::string& parallel = "auto",
                                     long long reserve_terms = -1,
-                                    const std::string& gpu_key = "auto", double gpu_beta = -1.0) {
+                                    const std::string& gpu_key = "auto", double gpu_beta = 0.35,
+                                    int max_unpaired = -1, int unpaired_period = 1) {
     Backend be;
     if (parallel == "auto")
         be = (n_threads > 1) ? Backend::sharded : Backend::serial;
@@ -393,6 +398,8 @@ inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const Majora
         be = Backend::sharded;
     else if (parallel == "gpu") {
 #ifdef FF_GPU
+        if (max_unpaired >= 0)
+            throw_error("majorana gpu backend does not support max_unpaired yet");
         trunc_stats().reset();
         return propagate_gpu_path(circuit, obs, maxdegree, mincoeff, batched, maxdegree_period,
                                   mincoeff_period, reserve_terms, gpu_key, gpu_beta);
@@ -458,12 +465,13 @@ inline MajoranaPolynomial propagate(const MajoranaCircuit& circuit, const Majora
 #ifdef FF_OPENMP
         if (be == Backend::sharded) {
             truncate_sharded(shards, n_threads, mincoeff, topk, applied - 1, maxdegree,
-                             maxdegree_period, mincoeff_period, first);
+                             maxdegree_period, mincoeff_period, first, max_unpaired,
+                             unpaired_period);
             continue;
         }
 #endif
         truncate_all(ret, mincoeff, topk, applied - 1, maxdegree, maxdegree_period,
-                     mincoeff_period, first);
+                     mincoeff_period, first, max_unpaired, unpaired_period);
     }
 #ifdef FF_OPENMP
     if (be == Backend::sharded) return from_sharded(shards);

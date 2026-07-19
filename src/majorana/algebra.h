@@ -65,6 +65,18 @@ struct MajoranaString {
     std::string to_string() const { return to_compact_string(); }
     std::vector<int> support_set() const { return alpha.support(); }
     int degree() const { return alpha.popcount(); }
+    // Number of unpaired modes: modes contributing exactly one of their two
+    // Majorana indices (mode j owns adjacent bits 2j, 2j+1). Only fully
+    // paired monomials survive Fock-state readout, so this grades the
+    // distance from the readout sector.
+    int unpaired() const {
+        int u = 0;
+        for (std::size_t i = 0; i < alpha.words.size(); ++i) {
+            const std::uint64_t w = alpha.words[i];
+            u += std::popcount((w ^ (w >> 1)) & 0x5555555555555555ULL);
+        }
+        return u;
+    }
     bool is_hermitian() const {
         int degmod4 = degree() % 4;
         return degmod4 == 0 || degmod4 == 1;
@@ -126,6 +138,7 @@ struct MajoranaMonomial {
     int extent() const { return s.extent(); }
     std::vector<int> support_set() const { return s.support_set(); }
     int degree() const { return s.degree(); }
+    int unpaired() const { return s.unpaired(); }
     MajoranaMonomial& operator*=(const ff_complex& b) {
         coeff *= b;
         return *this;

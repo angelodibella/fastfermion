@@ -254,3 +254,75 @@ def test_unknown_parallel_strategy_throws():
     with pytest.raises(Exception):
         ff.propagate(tv_circuit(3, 1.0, 1.0, 0.1, 2), ff.MajoranaString([1, 2]),
                      n_threads=4, parallel="shard")
+
+
+# -- gate (vii): the unpaired-mode cutoff -------------------------------------
+
+
+def test_unpaired_query():
+    # Native pairing: mode j owns indices (2j, 2j+1).
+    assert ff.MajoranaString([0, 1]).unpaired() == 0
+    assert ff.MajoranaString([1, 2]).unpaired() == 2
+    assert ff.MajoranaString([0, 1, 2]).unpaired() == 1
+    assert ff.MajoranaString([64, 65]).unpaired() == 0  # word-boundary pair
+    assert ff.MajoranaString([63, 64]).unpaired() == 2  # straddles the boundary
+
+
+def test_unpaired_jw_cross_validation():
+    # unpaired count = x-weight of the Jordan-Wigner image (a mode contributes
+    # X or Y at its site iff it supplies an odd number of Majorana factors),
+    # so max_unpaired on the Majorana side must reproduce max_xweight on the
+    # Pauli side gate for gate. batched=False on both sides pins the cadence.
+    import re
+
+    M = 4
+    spec = []
+    t, V, dt = 1.0, 2.0, 0.09
+    for _ in range(4):
+        for j in range(M - 1):
+            m = 2 * j + 1
+            spec.append(([m + 1, m + 2], 2 * (-t) * 0.5 * dt))
+            spec.append(([m, m + 3], 2 * (+t) * 0.5 * dt))
+            spec.append(([m, m + 1], 2 * (V / 4) * dt))
+            spec.append(([m + 2, m + 3], 2 * (V / 4) * dt))
+            spec.append(([m, m + 1, m + 2, m + 3], 2 * (-V / 4) * dt))
+    circ = [mrot(idx, th) for idx, th in spec]
+    obs = ff.MajoranaString([1, 2])
+
+    def pauli_rot(idx, theta):
+        k = len(idx)
+        r = 0 if k % 4 in (0, 1) else 1
+        img = ff.jw(ff.MajoranaPolynomial(ff.MajoranaString(idx)))
+        ((ps, ph),) = list(img.terms.items())
+        f = ((1j**r) * ph).real
+        assert abs(abs(f) - 1) < 1e-12
+        sites, labels = [], []
+        for lab, q in re.findall(r"([XYZ])(\d+)", str(ps)):
+            labels.append(lab)
+            sites.append(int(q))
+        return ff.ROT("".join(labels), sites, f * theta)
+
+    pcirc = [pauli_rot(i, th) for i, th in spec]
+    pobs = ff.jw(ff.MajoranaPolynomial(ff.MajoranaPolynomial(obs)))
+    for u in (0, 2, 4):
+        maj = ff.jw(ff.propagate(circ, obs, max_unpaired=u, batched=False))
+        pl = ff.propagate(pcirc, pobs, max_xweight=u, batched=False)
+        da, db = poly_dict(maj), poly_dict(pl)
+        assert da.keys() == db.keys()
+        assert all(abs(da[k] - db[k]) < 1e-12 for k in da)
+
+
+def test_unpaired_noop_and_backends():
+    circ = tv_circuit(4, 1.0, 2.0, 0.07, 4)
+    obs = ff.MajoranaString([2, 3])
+    base = poly_dict(ff.propagate(circ, obs))
+    noop = poly_dict(ff.propagate(circ, obs, max_unpaired=10**6))
+    assert base == noop
+    se = poly_dict(ff.propagate(circ, obs, max_unpaired=2))
+    sm = poly_dict(ff.propagate(circ, obs, max_unpaired=2, n_threads=4,
+                                parallel="serial-merge"))
+    sh = poly_dict(ff.propagate(circ, obs, max_unpaired=2, n_threads=4,
+                                parallel="sharded"))
+    assert se.keys() == sm.keys() == sh.keys()
+    assert all(abs(se[k] - sm[k]) < 1e-14 for k in se)
+    assert all(abs(se[k] - sh[k]) < 1e-14 for k in se)

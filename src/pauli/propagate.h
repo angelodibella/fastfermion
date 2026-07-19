@@ -616,7 +616,7 @@ inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& 
                                  int maxdegree_period = 1, int mincoeff_period = 1,
                                  bool batched = true, const std::string& parallel = "auto",
                                  long long reserve_terms = -1,
-                                 const std::string& gpu_key = "auto", double gpu_beta = -1) {
+                                 const std::string& gpu_key = "auto", double gpu_beta = 0.35) {
 #ifndef FF_OPENMP
     n_threads = 1;
 #endif
