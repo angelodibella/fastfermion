@@ -5,7 +5,7 @@
 */
 
 // CUDA engine behind src/pauli/propagate_gpu.h: a sorted ping-pong term array
-// with deferred deduplication (design + measured rationale in GPU_PLAN.md).
+// with deferred deduplication.
 //
 // Per gate (emission): flag anticommuting terms whose partner survives the
 // weight cutoff -> exclusive offsets by scan -> one pass that scales kept

@@ -5,7 +5,7 @@
 */
 
 // GPU Pauli propagation engine: sorted ping-pong term array with deferred
-// deduplication (see GPU_PLAN.md).
+// deduplication.
 //
 // This header is the only seam between the header-only C++ library and the
 // CUDA translation unit (propagate_gpu.cu). fastfermion is a single

@@ -6,7 +6,7 @@
 //   "serial"   — baseline, one thread
 //   "omp"      — parallel emission, serial hash-map rebuild
 //   "sharded"  — sharded hash-map, all-parallel merge
-//   "gpu"      — CUDA sorted-array engine (built with -Dgpu=enabled; see GPU_PLAN.md)
+//   "gpu"      — CUDA sorted-array engine (built with -Dgpu=enabled)
 //   "auto"     — serial when n_threads=1, sharded when n_threads>1 (never gpu)
 //
 // Gate batching is on by default.
@@ -506,7 +506,7 @@ inline PauliPolynomial propagate_gpu_path(const Circuit& circuit, const PauliPol
     // needs no scheduled compaction: the emission filter reads only the Pauli
     // string, never the coefficient, so whether duplicates have been summed
     // yet cannot change which terms survive, and deduplication can be deferred
-    // to the engine's capacity budget (GPU_PLAN.md, D1). A deferred weight
+    // to the engine's capacity budget. A deferred weight
     // schedule (period > 1) lifts the emission filter and enforces the cutoff
     // at its events inside compact(), like the threshold.
     const int emit_deg = (maxdegree_period <= 1) ? maxdegree : ff_ulong::DIGITS;
