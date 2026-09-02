@@ -1,0 +1,7 @@
+option(
+  'key_words',
+  type: 'integer',
+  min: 1,
+  value: 2,
+  description: '64-bit words per Pauli string bit-plane: at most 64 * key_words qubits (and Fermi or Majorana modes)',
+)

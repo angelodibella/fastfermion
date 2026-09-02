@@ -1,6 +1,9 @@
 # For development only
-pytest
+meson
+meson-python
+ninja
 pybind11
+pytest
 scipy
 openfermion
 cirq

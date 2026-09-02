@@ -38,19 +38,20 @@ from Python. See the `examples` folder to get started, or check out [this tour o
 
 ### Building from source
 
-Assuming you have a modern C++ compiler, simply run from the root directory of the package:
+Building requires a C++20 compiler and the Python packages `meson`, `meson-python`, `ninja` and `pybind11`. From the root directory of the package:
 
 ```shell
-make ffcore
+pip3 install .
 ```
 
-This will create a binary file `ffcore...` inside the `fastfermion` subdirectory.
-To import the package in Python, just add the root fastfermion directory in your path, e.g.,
+For development, `make ffcore` compiles the binary `ffcore...` in place inside the `fastfermion` subdirectory (`make test` also runs the test suite). The package can then be imported by adding the root fastfermion directory to your path, e.g.,
 
 ```python
 >>> import sys
 >>> sys.path.insert(0,"/path/to/fastfermion")
 >>> import fastfermion
 ```
+
+For systems of at most 64 qubits, the meson option `-Dkey_words=1` makes the Pauli string key a single machine word, which is faster (`pip3 install -Csetup-args=-Dkey_words=1 .`).
 
 You could also use the library directly in your C++ project (even though the library was primarily intended to be used in Python). It is header-only, so you can just include the relevant header files from `src/`.

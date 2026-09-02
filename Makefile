@@ -1,41 +1,25 @@
-PYTHON = python3
+PYTHON ?= python3
+BUILDDIR ?= builddir
+MESON := $(PYTHON) -m mesonbuild.mesonmain
+EXT_SUFFIX := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 
-# Python stuff
-# (`python3 -m site --user-site` returns the site-packages directory)
-PYTHON_EXTENSION_SUFFIX := $(shell ${PYTHON}-config --extension-suffix)
-PYBIND11_INCLUDES := $(shell ${PYTHON} -m pybind11 --includes)
+.PHONY: ffcore test install clean
 
-$(info PYTHON_EXTENSION_SUFFIX = $(PYTHON_EXTENSION_SUFFIX))
-$(info PYBIND11_INCLUDES = $(PYBIND11_INCLUDES))
+# Compiles the extension module in place (fastfermion/ffcore...) so that the package can be
+# imported from this directory. Pass meson options with MESON_ARGS, e.g. MESON_ARGS=-Dkey_words=1
+ffcore:
+	$(MESON) setup $(BUILDDIR) $(MESON_ARGS) $$(test -d $(BUILDDIR) && echo --reconfigure)
+	$(MESON) compile -C $(BUILDDIR)
+	cp $(BUILDDIR)/ffcore$(EXT_SUFFIX) fastfermion/
 
-# Compilation flags for the Python module
-OPTFLAGS = -O3 -DNDEBUG
-CCFLAGS = -Wall -shared -std=c++2a -fPIC $(PYBIND11_INCLUDES)
-ifeq ($(shell uname -s), Darwin)
-	CCFLAGS += -undefined dynamic_lookup
-endif
+test: ffcore
+	$(PYTHON) -m pytest test
 
-ffcore: src/*.h src/python_bind.cpp
-	g++ $(OPTFLAGS) $(CCFLAGS) -DFF_VERSION=\"dev$(shell date '+%Y-%m-%d.%H-%M-%S')\" src/python_bind.cpp -o fastfermion/ffcore$(PYTHON_EXTENSION_SUFFIX)
+install:
+	$(PYTHON) -m pip install .
 
-pytest:
-	pytest ./test
+clean:
+	rm -rf $(BUILDDIR) build dist *.egg-info fastfermion/ffcore$(EXT_SUFFIX)
 
 cpptest: src/*.h cpptest/*.h cpptest/run_test.cpp
 	g++ -O3 -std=c++2a cpptest/run_test.cpp -o cpptest/run_test
-
-# Uses gcovr
-testcov:
-	(rm ./fastfermion/*.gcda && \
-	g++ $(CCFLAGS) -DFF_VERSION=\"devcov\" --coverage -g src/python_bind.cpp -o fastfermion/ffcore$(PYTHON_EXTENSION_SUFFIX) && \
-	pytest ./test && \
-	gcovr ./fastfermion/)
-
-# Invokes setup.py
-# Will create wheel and store it in dist folder
-build-wheel:
-	python3 -m build --wheel
-
-install:
-	pip3 uninstall fastfermion
-	pip3 install --user $(shell ls -rt ./dist/fastfermion-*.whl | tail -n 1)

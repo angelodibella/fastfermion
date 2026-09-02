@@ -4,9 +4,12 @@
 /cpptest/run_test
 /dist/
 /build/
+/builddir/
+/.mesonpy-*/
 /wheelhouse/
 
 *.so
+*.pyd
 *.a
 *.pyc
 *.whl

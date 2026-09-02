@@ -15,7 +15,10 @@
 
 namespace fastfermion {
 
-#define SYS_NUM_ULONG 2 // Number of supported qubits will be 64*SYS_NUM_ULONG
+// Number of supported qubits will be 64*SYS_NUM_ULONG (the meson option key_words)
+#ifndef SYS_NUM_ULONG
+#define SYS_NUM_ULONG 2
+#endif
 
 #define MIN(a,b) ((a<b) ? (a) : (b))
 #define MAX(a,b) ((a>b) ? (a) : (b))

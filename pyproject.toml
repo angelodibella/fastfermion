@@ -1,6 +1,18 @@
 [build-system]
-requires = ["setuptools","wheel","pybind11"]
-build-backend = "setuptools.build_meta"
+requires = ["meson-python>=0.16", "meson>=1.2", "ninja", "pybind11>=2.13"]
+build-backend = "mesonpy"
+
+[project]
+name = "fastfermion"
+dynamic = ["version"]
+description = "A library for manipulating polynomials in Pauli, Fermi and Majorana operators."
+readme = "README.md"
+authors = [{name = "Hamza Fawzi", email = "hamzafawzi@gmail.com"}]
+requires-python = ">=3.10"
+dependencies = ["scipy"]
+
+[project.urls]
+Homepage = "https://github.com/hfawzi/fastfermion"
 
 [tool.cibuildwheel]
 test-requires = ["pytest","openfermion","cirq"]
