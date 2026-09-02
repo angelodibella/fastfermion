@@ -8,12 +8,19 @@
 
 #include "common.h"
 #include <string>
+#include <sstream>
+#include <locale>
 #include <format> // for std::format
 
 namespace fastfermion {
 
+// Formatted in the classic locale so that the output does not depend on the global locale,
+// which another library in the process may change
 std::string format_float(const ff_float& v) {
-    return (std::stringstream() << v).str();
+    std::stringstream ss;
+    ss.imbue(std::locale::classic());
+    ss << v;
+    return ss.str();
 };
 
 std::string format_complex(const ff_complex& z) {
