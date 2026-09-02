@@ -7,9 +7,9 @@
 #pragma once
 
 #include "common.h"
-#include "pauli_algebra.h"
+#include "pauli/algebra.h"
 #include "fermi_algebra.h"
-#include "majorana_algebra.h"
+#include "majorana/algebra.h"
 
 namespace fastfermion {
 

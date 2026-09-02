@@ -4,19 +4,19 @@
     by a license that can be found in the LICENSE file.
 */
 
-#include "pauli_algebra.h"
+#include "pauli/algebra.h"
 #include "fermi_algebra.h"
-#include "majorana_algebra.h"
-#include "pauli_sparse.h"
+#include "majorana/algebra.h"
+#include "pauli/sparse.h"
 #include "fermi_sparse.h"
-#include "majorana_sparse.h"
+#include "majorana/sparse.h"
 #include "transforms.h"
 #include "fockstate.h"
 #include "qubitproductstate.h"
-#include "pauli_gates.h"
-#include "pauli_propagation.h"
-#include "majorana_gates.h"
-#include "majorana_propagation.h"
+#include "pauli/gates.h"
+#include "pauli/propagate.h"
+#include "majorana/gates.h"
+#include "majorana/propagate.h"
 #include "gen.h"
 
 #include <pybind11/pybind11.h>

@@ -7,7 +7,7 @@
 #pragma once
 
 #include "format_poly.h"
-#include "majorana_algebra.h"
+#include "majorana/algebra.h"
 
 namespace fastfermion {
 

@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "majorana_gates.h"
+#include "majorana/gates.h"
 
 namespace fastfermion {
 

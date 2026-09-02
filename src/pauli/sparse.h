@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "pauli_algebra.h"
+#include "pauli/algebra.h"
 #include "matrix.h" // for CSCMatrix
 #include "bits_utils.h" // for next_combination
 #include "subspaces.h"

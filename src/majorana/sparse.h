@@ -7,7 +7,7 @@
 #pragma once
 
 #include "matrix.h"
-#include "majorana_algebra.h"
+#include "majorana/algebra.h"
 #include "transforms.h"
 
 namespace fastfermion {
