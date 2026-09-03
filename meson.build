@@ -36,6 +36,23 @@ if omp.found()
 endif
 message('OpenMP: ' + (omp.found() ? 'enabled' : 'not found, propagate() will be single-threaded'))
 
+# CUDA is optional: the GPU backend (parallel="gpu") needs nvcc
+gpu = get_option('gpu')
+have_gpu = not gpu.disabled() and add_languages('cuda', required: gpu.enabled(), native: false)
+if have_gpu
+  cuda = dependency('cuda', required: gpu.enabled())
+  have_gpu = cuda.found()
+endif
+ff_sources = ['src/python_bind.cpp']
+ff_cuda_args = []
+if have_gpu
+  ff_deps += cuda
+  ff_args += '-DFF_GPU'
+  ff_cuda_args = ['-O3', '-std=c++20', '-arch=' + get_option('gpu_arch')]
+  ff_sources += 'src/gpu/engine.cu'
+endif
+message('GPU backend: ' + (have_gpu ? 'enabled (nvcc -arch=' + get_option('gpu_arch') + ')' : 'disabled'))
+
 # Hide the extension's own symbols (pybind11's recommendation) and, on Linux, those of any
 # statically linked runtime: a libstdc++ bundled into the module would otherwise share its
 # STB_GNU_UNIQUE symbols with a different libstdc++ loaded by another extension.
@@ -46,11 +63,12 @@ endif
 
 py.extension_module(
   'ffcore',
-  'src/python_bind.cpp',
+  ff_sources,
   subdir: 'fastfermion',
   dependencies: ff_deps,
   include_directories: [include_directories('src', 'src/hashmap'), include_directories(pybind11_include, is_system: true)],
   cpp_args: ff_args,
+  cuda_args: ff_cuda_args,
   gnu_symbol_visibility: 'hidden',
   link_args: link_args,
   install: true,

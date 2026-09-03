@@ -17,6 +17,10 @@
 #include <omp.h>
 #endif
 
+#ifdef FF_GPU
+#include "gpu/engine.h"
+#endif
+
 namespace fastfermion {
 
 // Conjugation of a term map by a rotation gate e^{-i theta/2 A}: a term x anticommuting with
@@ -139,21 +143,29 @@ struct ShardedBackend {
 
 #endif  // FF_OPENMP
 
-enum class Backend { serial, sharded };
+enum class Backend { serial, sharded, gpu };
 
-// The backend named by parallel: "serial", "sharded", or "auto" for sharded when n_threads > 1
-// and serial otherwise. Without OpenMP, or with n_threads <= 1, the backend is serial.
+// The backend named by parallel: "serial", "sharded", "gpu", or "auto" for sharded when
+// n_threads > 1 and serial otherwise. Without OpenMP, or with n_threads <= 1, the CPU backend is
+// serial.
 inline Backend select_backend(const std::string& parallel, int n_threads) {
     if (n_threads < 1) throw_error("n_threads must be >= 1");
     Backend backend;
-    if (parallel == "auto") {
+    if (parallel == "gpu") {
+#ifdef FF_GPU
+        if (gpu::device_count() == 0) throw_error("No CUDA device available");
+        return Backend::gpu;
+#else
+        throw_error("fastfermion was built without GPU support (meson option -Dgpu=enabled)");
+#endif
+    } else if (parallel == "auto") {
         backend = n_threads > 1 ? Backend::sharded : Backend::serial;
     } else if (parallel == "serial") {
         backend = Backend::serial;
     } else if (parallel == "sharded") {
         backend = Backend::sharded;
     } else {
-        throw_error("Unknown parallel strategy \"" << parallel << "\" (valid: auto, serial, sharded)");
+        throw_error("Unknown parallel strategy \"" << parallel << "\" (valid: auto, serial, sharded, gpu)");
     }
 #ifndef FF_OPENMP
     n_threads = 1;

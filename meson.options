@@ -5,3 +5,15 @@ option(
   value: 2,
   description: '64-bit words per Pauli string bit-plane: at most 64 * key_words qubits (and Fermi or Majorana modes)',
 )
+option(
+  'gpu',
+  type: 'feature',
+  value: 'auto',
+  description: 'CUDA GPU backend (parallel="gpu"); auto enables it when nvcc is found',
+)
+option(
+  'gpu_arch',
+  type: 'string',
+  value: 'native',
+  description: 'nvcc -arch value (native, all-major, sm_90, ...)',
+)

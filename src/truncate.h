@@ -27,6 +27,7 @@ struct TruncStats {
     long long n_tau_events = 0;  // number of threshold events
     long long n_w_events = 0;    // number of scheduled degree events (maxdegree_period > 1)
     std::size_t peak_terms = 0;  // largest number of terms held before a truncation event
+    std::size_t peak_device_bytes = 0;  // high-water mark of the GPU backend's device memory (0 on the CPU)
 };
 
 inline TruncStats& trunc_stats() {

@@ -353,6 +353,14 @@ void add_propagation_common(py::module_& m) {
 #else
         false;
 #endif
+#ifdef FF_GPU
+    m.attr("has_gpu") = true;
+    m.def("gpu_device_count", []() { return gpu::device_count(); }, "Number of CUDA devices");
+    m.def("_gpu_phase_check", &pauli_gates::gpu_phase_check, py::arg("n_pairs") = 100000, py::arg("seed") = 1234);
+#else
+    m.attr("has_gpu") = false;
+    m.def("gpu_device_count", []() { return 0; }, "Number of CUDA devices");
+#endif
 
     m.def("trunc_stats", []() {
         const TruncStats& stats = trunc_stats();
@@ -361,6 +369,7 @@ void add_propagation_common(py::module_& m) {
         d["n_tau_events"] = stats.n_tau_events;
         d["n_w_events"] = stats.n_w_events;
         d["peak_terms"] = stats.peak_terms;
+        d["peak_device_bytes"] = stats.peak_device_bytes;
         return d;
     }, R"DOC(
         Statistics of the last call to propagate (Pauli or Majorana) in the calling thread:
@@ -370,6 +379,7 @@ void add_propagation_common(py::module_& m) {
         * n_tau_events: number of times the mincoeff rule fired
         * n_w_events: number of times a maxdegree rule with maxdegree_period > 1 fired
         * peak_terms: largest number of terms held before a truncation
+        * peak_device_bytes: device memory used by the GPU backend (0 otherwise)
         )DOC"
     );
 
@@ -390,8 +400,15 @@ void add_pauli_propagation(py::module_& m) {
             int xweight_period,
             bool batched,
             int n_threads,
-            const std::string& parallel
+            const std::string& parallel,
+            const std::optional<long long>& reserve_terms,
+            const std::string& gpu_key,
+            double gpu_beta
         ) {
+            GpuOptions gpu_options;
+            gpu_options.reserve_terms = reserve_terms.value_or(-1);
+            gpu_options.key = gpu_key;
+            gpu_options.beta = gpu_beta;
             pauli_gates::PauliTruncation truncation;
             warn_if_no_openmp(n_threads);
             truncation.maxdegree = maxdegree.value_or(INT_MAX);
@@ -402,12 +419,13 @@ void add_pauli_propagation(py::module_& m) {
             truncation.mincoeff_period = mincoeff_period;
             truncation.xweight_period = xweight_period;
             const PauliPolynomial obs = observable.index() == 0 ? PauliPolynomial(std::get<0>(observable)) : std::get<1>(observable);
-            return pauli_gates::propagate(circuit, obs, truncation, batched, n_threads, parallel);
+            return pauli_gates::propagate(circuit, obs, truncation, batched, n_threads, parallel, gpu_options);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
         py::arg("topk") = py::none(), py::arg("max_xweight") = py::none(), py::arg("maxdegree_period") = 1,
         py::arg("mincoeff_period") = 1, py::arg("xweight_period") = 1, py::arg("batched") = false,
-        py::arg("n_threads") = 1, py::arg("parallel") = "auto",
+        py::arg("n_threads") = 1, py::arg("parallel") = "auto", py::arg("reserve_terms") = py::none(),
+        py::arg("gpu_key") = "auto", py::arg("gpu_beta") = 0.35,
         py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Backpropagates a polynomial through a circuit.
@@ -431,6 +449,21 @@ void add_pauli_propagation(py::module_& m) {
         ignores it), the terms being partitioned between the threads (parallel="sharded", the default
         when n_threads > 1; parallel="serial" forces one thread). The results do not depend on the
         number of threads, up to rounding (which may change the terms topk keeps in case of ties).
+
+        parallel="gpu" runs the propagation on a CUDA device (needs a build with the meson option
+        -Dgpu=enabled) with maxdegree, mincoeff and their periods (not topk nor max_xweight), on an
+        observable with real coefficients of at most 128 qubits. The remaining arguments only affect
+        the speed and memory of the GPU backend:
+        * reserve_terms: number of terms to allocate for (the buffers hold twice as many, for the new
+          terms of a gate). By default (None) the buffers are allocated once for the number of strings
+          of degree at most maxdegree when this fits in the device memory, otherwise they grow on
+          demand, as with reserve_terms=0.
+        * gpu_key: representation of the strings on the device, "dense" (2 bits per qubit) or "support"
+          (the list of non-identity sites, for maxdegree at most 14 and circuits without Clifford
+          gates); "auto" picks the smaller.
+        * gpu_beta: the new terms are deduplicated once they exceed gpu_beta times the others (0: after
+          every gate, negative: only when the buffers are full).
+        trunc_stats()["peak_device_bytes"] is the device memory used.
 
         Examples:
         >>> from fastfermion import H, CNOT, propagate
@@ -487,8 +520,15 @@ void add_majorana_propagation(py::module_& m) {
             int unpaired_period,
             bool batched,
             int n_threads,
-            const std::string& parallel
+            const std::string& parallel,
+            const std::optional<long long>& reserve_terms,
+            const std::string& gpu_key,
+            double gpu_beta
         ) {
+            GpuOptions gpu_options;
+            gpu_options.reserve_terms = reserve_terms.value_or(-1);
+            gpu_options.key = gpu_key;
+            gpu_options.beta = gpu_beta;
             majorana_gates::MajoranaTruncation truncation;
             warn_if_no_openmp(n_threads);
             truncation.maxdegree = maxdegree.value_or(INT_MAX);
@@ -499,12 +539,13 @@ void add_majorana_propagation(py::module_& m) {
             truncation.mincoeff_period = mincoeff_period;
             truncation.unpaired_period = unpaired_period;
             const MajoranaPolynomial obs = observable.index() == 0 ? MajoranaPolynomial(std::get<0>(observable)) : std::get<1>(observable);
-            return majorana_gates::propagate(circuit, obs, truncation, batched, n_threads, parallel);
+            return majorana_gates::propagate(circuit, obs, truncation, batched, n_threads, parallel, gpu_options);
         },
         py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
         py::arg("topk") = py::none(), py::arg("max_unpaired") = py::none(), py::arg("maxdegree_period") = 1,
         py::arg("mincoeff_period") = 1, py::arg("unpaired_period") = 1, py::arg("batched") = false,
-        py::arg("n_threads") = 1, py::arg("parallel") = "auto",
+        py::arg("n_threads") = 1, py::arg("parallel") = "auto", py::arg("reserve_terms") = py::none(),
+        py::arg("gpu_key") = "auto", py::arg("gpu_beta") = 0.35,
         py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Backpropagates a Majorana polynomial through a Majorana circuit.
@@ -513,7 +554,9 @@ void add_majorana_propagation(py::module_& m) {
         Pauli propagate. max_unpaired discards the terms with more than max_unpaired unpaired modes
         (modes with exactly one of their two Majorana operators in the term), as they are created by
         default or after every unpaired_period-th gate if unpaired_period > 1; such terms have zero
-        expectation in every Fock state. n_threads and parallel are as in the Pauli propagate.
+        expectation in every Fock state. n_threads, parallel and the GPU arguments are as in the Pauli
+        propagate (the GPU backend supports maxdegree and mincoeff on a Hermitian observable of at
+        most 128 modes, with gpu_key="dense").
 
         Examples:
         >>> from fastfermion import MROT, MajoranaString, propagate

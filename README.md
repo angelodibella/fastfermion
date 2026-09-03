@@ -15,7 +15,7 @@ Computing the Jordan-Wigner transform of a CrO molecule Hamiltonian with > 10<su
 * Fermionic and Majorana operators are automatically put in normal ordered form
 * Conversion between Pauli, Fermi, and Majorana representations (Jordan-Wigner and reverse Jordan-Wigner)
 * Sparse matrix representations
-* Heisenberg evolution: Propagate polynomial through a sequence of unitaries/gates with truncation by degree, coefficient magnitude or number of terms, on one or several threads (OpenMP)
+* Heisenberg evolution: Propagate polynomial through a sequence of unitaries/gates with truncation by degree, coefficient magnitude or number of terms, on one or several threads (OpenMP) or on a GPU (CUDA)
 * Interface with OpenFermion and Cirq
 * Up to 200x faster than OpenFermion
 * More to come ...
@@ -53,5 +53,9 @@ For development, `make ffcore` compiles the binary `ffcore...` in place inside t
 ```
 
 OpenMP is used when the compiler supports it: `propagate(circuit, observable, n_threads=8)` runs on 8 threads. For systems of at most 64 qubits, the meson option `-Dkey_words=1` makes the Pauli string key a single machine word (and halves the Fermi and Majorana keys), which is faster (`pip3 install -Csetup-args=-Dkey_words=1 .`).
+
+#### GPU backend
+
+With the CUDA toolkit installed (tested with CUDA 12.8), the GPU backend is built automatically (`-Dgpu=enabled` to require it, `-Dgpu=disabled` to skip it; or `make ffcore MESON_ARGS=-Dgpu=enabled`), and `propagate(circuit, observable, maxdegree=6, parallel="gpu")` propagates on the device: at most 128 qubits or modes, with the degree cutoff and the coefficient threshold, on an observable with real coefficients. The meson option `gpu_arch` selects the target architecture (`native` by default, e.g., `-Dgpu_arch=sm_80` when building on a machine without a GPU).
 
 You could also use the library directly in your C++ project (even though the library was primarily intended to be used in Python). It is header-only, so you can just include the relevant header files from `src/`.
