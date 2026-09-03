@@ -4,8 +4,13 @@
     by a license that can be found in the LICENSE file.
 */
 
-#include "pauli/gates.h"
+#pragma once
 
+#include "backends.h"
+#include "pauli/gates.h"
+#include "pauli/truncate.h"
+
+#include <string>
 #include <variant>
 #include <functional>
 
@@ -25,7 +30,7 @@ using Gate = std::variant<CliffordGate,ROT>;
 // A circuit is a sequence of gates
 using Circuit = std::vector<Gate>;
 
-std::pair<PauliString, ff_complex> propagate_clifford(const CliffordCircuit& circuit, const PauliString& a) {
+inline std::pair<PauliString, ff_complex> propagate_clifford(const CliffordCircuit& circuit, const PauliString& a) {
     ff_complex coeff = 1;
     PauliString res = a;
     for(int i=circuit.size()-1; i>=0; i--) {
@@ -51,107 +56,97 @@ std::pair<PauliString, ff_complex> propagate_clifford(const CliffordCircuit& cir
     return std::make_pair(res,coeff);
 }
 
-void _apply_clifford_circuit(PauliPolynomial& poly, const Circuit& circuit, int begin, int end) {
-    // begin < end
-    // Explicitly form the Clifford circuit
-    // This is not really needed...
-    // TODO: fix this
-    CliffordCircuit cc(end-begin);
-    for(int j=begin; j<end; ++j) {
-        try {
-            cc[j-begin] = std::get<CliffordGate>(circuit[j]);
-        } catch(const std::bad_variant_access& err) {
-            throw_error("Internal error: circuit[begin:end] contains non-Clifford gates");
-        }
-    }
-    // Apply the Clifford circuit to all the elements
+// Applies the Clifford gates circuit[begin:end] (last gate first) to all the terms of poly
+inline void _apply_clifford_circuit(PauliPolynomial& poly, const Circuit& circuit, int begin, int end) {
     PauliPolynomial poly2;
     for(const auto& [x,val] : poly.terms) {
-        const auto& [y,mult] = propagate_clifford(cc, x);
+        PauliString y = x;
+        ff_complex mult = 1;
+        for(int j=end-1; j>=begin; j--) {
+            std::visit([&y, &mult](const auto& gate) { gate.apply_inplace(y,mult); }, std::get<CliffordGate>(circuit[j]));
+        }
         poly2.terms[y] += mult*val;
     }
-    // Replace poly
     poly.terms.swap(poly2.terms);
 }
 
-PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a, const int& maxdegree=128, const ff_float& mincoeff=0) {
-    // The main Pauli propagation function
-    PauliPolynomial poly(a);
-    int clifford_begin;
-    bool pending_clifford_operations = false;
-    for(int i=circuit.size()-1; i>=0; i--) {
-        // Check if gate is a Clifford or a Rotation
-        if(circuit[i].index() == 0) {
-            // Clifford gate
-            if(!pending_clifford_operations) {
-                clifford_begin = i;
-                pending_clifford_operations = true;
-            }
-        } else if (circuit[i].index() == 1) {
-            // We need to check first if there are pending Clifford
-            // operations we accumulated
-            if(pending_clifford_operations) {
-                _apply_clifford_circuit(poly, circuit, i+1, clifford_begin+1);
-                pending_clifford_operations = false;
-            }
+// Conjugation constants of a Pauli rotation e^{-i theta/2 P} (see conjugate in backends.h)
+struct Rotation {
+    const PauliString& axis;
+    ff_float cos_t;
+    ff_complex isin_t;
+    explicit Rotation(const ROT& gate)
+        : axis(gate.ps), cos_t(std::cos(gate.theta)), isin_t(0, std::sin(gate.theta)) {}
+    static int degree(const PauliString& s) { return s.degree_total(); }
+};
 
-            // Apply Pauli rotation
-            const ROT& gate = std::get<ROT>(circuit[i]);
-            //
-            // We use the fact that
-            //   ROT_{ps,theta}(x) = x                                  if ps and x commute
-            //                     = cos(theta)*x + i*sin(theta)*ps*x   else
-            //
-            // Here ps is the PauliString
-            //
-            
-            // o_new will hold all the new terms that will be added to poly
-            // which are of the form I*sin(theta)*gate.ps*x
-            // where x ranges over all terms in poly that do not commute with gate.ps
-            std::vector<std::pair<PauliString, ff_complex>> o_new;
-
-            // This is an over-estimate. The true size of o_new is the number of terms
-            // in poly that don't commute with gate.ps
-            o_new.reserve(poly.terms.size());
-
-            // Some precomputation
-            const PauliString& ps = gate.ps;
-            const ff_float& theta = gate.theta;
-            const ff_float costheta = cos(theta);
-            const ff_complex isintheta = ff_complex(0,sin(theta));
-
-            // Populate o_new
-            for(auto& [x,v] : poly.terms) {
-                if (!x.commutes(ps)) {
-                    PauliMonomial px = ps*x;
-                    if(px.degree_total() <= maxdegree) {
-                        o_new.emplace_back(px.pauli_string(),v*isintheta*px.coefficient());
-                    }
-                    // The term x will get multiplied by cos(theta)
-                    v *= costheta;
-                }
-            }
-
-            // Add all the new terms
-            for(const auto& [x,v] : o_new) {
-                poly.terms[x] += v;
-            }
-
-            // Truncate terms
-            if(mincoeff > 0) {
-                std::erase_if(poly.terms, [&mincoeff](const auto& term) { return std::abs(term.second) <= mincoeff; });
-            }
-        }
+// Whether the rotation gates circuit[j..i] all commute with ps
+inline bool _commute_with(const Circuit& circuit, int j, int i, const PauliString& ps) {
+    for(int g=j; g<=i; g++) {
+        if(!std::get<ROT>(circuit[g]).ps.commutes(ps)) return false;
     }
-    if(pending_clifford_operations) {
-        _apply_clifford_circuit(poly, circuit, 0, clifford_begin+1);
-        pending_clifford_operations = false;
-    }
-    return poly;
+    return true;
 }
 
+// Propagates the observable held by the backend through the circuit, last gate first. Rotation
+// gates are applied one window at a time -- a single gate, or a maximal run of mutually
+// commuting gates when batching is on -- and the truncation rules fire after each window. Runs
+// of Clifford gates are applied to all the terms at once.
+template <class Backend>
+PauliPolynomial run(const Circuit& circuit, Backend& backend, bool batched) {
+    int applied = 0;  // rotation gates applied so far, i.e., the gate index of the schedule
+    int i = int(circuit.size()) - 1;
+    while(i >= 0) {
+        int j = i;  // the window is circuit[j..i]
+        if(circuit[i].index() == 0) {
+            while(j > 0 && circuit[j-1].index() == 0) j--;
+            PauliPolynomial obs = backend.take();
+            _apply_clifford_circuit(obs, circuit, j, i+1);
+            if(j == 0) return obs;
+            backend.load(std::move(obs));
+        } else {
+            if(batched) {
+                while(j > 0 && circuit[j-1].index() == 1 && _commute_with(circuit, j, i, std::get<ROT>(circuit[j-1]).ps)) j--;
+            }
+            const int first = applied;
+            for(int g=i; g>=j; g--, applied++) backend.conjugate(Rotation(std::get<ROT>(circuit[g])));
+            backend.truncate(first, applied-1);
+        }
+        i = j-1;
+    }
+    return backend.take();
+}
 
-PauliPolynomial propagate(const Circuit& circuit, const PauliString& a, const int maxdegree=128) {
+// The main Pauli propagation function: Heisenberg evolution of a through the circuit with the
+// given truncation rules (see Truncation and PauliTruncation), on the backend named by parallel
+// (see select_backend in backends.h) with n_threads OpenMP threads
+inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a, const PauliTruncation& truncation, bool batched=false, int n_threads=1, const std::string& parallel="auto") {
+    if(truncation.maxdegree_period < 1 || truncation.mincoeff_period < 1 || truncation.xweight_period < 1) {
+        throw_error("Truncation periods must be >= 1");
+    }
+    trunc_stats() = TruncStats();
+    switch(select_backend(parallel, n_threads)) {
+#ifdef FF_OPENMP
+        case Backend::sharded: {
+            ShardedBackend<PauliPolynomial, PauliTruncation> backend(a, truncation, n_threads);
+            return run(circuit, backend, batched);
+        }
+#endif
+        default: {
+            SerialBackend<PauliPolynomial, PauliTruncation> backend(a, truncation);
+            return run(circuit, backend, batched);
+        }
+    }
+}
+
+inline PauliPolynomial propagate(const Circuit& circuit, const PauliPolynomial& a, const int& maxdegree=128, const ff_float& mincoeff=0) {
+    PauliTruncation truncation;
+    truncation.maxdegree = maxdegree;
+    truncation.mincoeff = mincoeff;
+    return propagate(circuit, a, truncation);
+}
+
+inline PauliPolynomial propagate(const Circuit& circuit, const PauliString& a, const int maxdegree=128) {
     return propagate(circuit, PauliPolynomial(a), maxdegree);
 }
 

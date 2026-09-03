@@ -333,30 +333,104 @@ void add_pauli_gates(py::module_& m) {
         )DOC";
 }
 
+// propagate() releases the GIL, so the warning reacquires it
+void warn_if_no_openmp(int n_threads) {
+#ifndef FF_OPENMP
+    if(n_threads > 1) {
+        py::gil_scoped_acquire gil;
+        if(PyErr_WarnEx(PyExc_RuntimeWarning, "n_threads > 1 ignored: fastfermion was built without OpenMP", 1) < 0) {
+            throw py::error_already_set();
+        }
+    }
+#endif
+}
+
+void add_propagation_common(py::module_& m) {
+
+    m.attr("has_openmp") =
+#ifdef FF_OPENMP
+        true;
+#else
+        false;
+#endif
+
+    m.def("trunc_stats", []() {
+        const TruncStats& stats = trunc_stats();
+        py::dict d;
+        d["cert_tau"] = stats.cert_tau;
+        d["n_tau_events"] = stats.n_tau_events;
+        d["n_w_events"] = stats.n_w_events;
+        d["peak_terms"] = stats.peak_terms;
+        return d;
+    }, R"DOC(
+        Statistics of the last call to propagate (Pauli or Majorana) in the calling thread:
+        * cert_tau: bound on the norm of the difference between the result and the result of the same
+          propagation without mincoeff (the sum over threshold events of the norm of the discarded terms);
+          the other rules are not certified
+        * n_tau_events: number of times the mincoeff rule fired
+        * n_w_events: number of times a maxdegree rule with maxdegree_period > 1 fired
+        * peak_terms: largest number of terms held before a truncation
+        )DOC"
+    );
+
+}
+
 void add_pauli_propagation(py::module_& m) {
-    
+
     m.def("propagate",
         [](
             const pauli_gates::Circuit& circuit,
             const std::variant<PauliString, PauliPolynomial>& observable,
             const std::optional<int>& maxdegree,
-            const std::optional<ff_float>& mincoeff
+            const std::optional<ff_float>& mincoeff,
+            const std::optional<int>& topk,
+            const std::optional<int>& max_xweight,
+            int maxdegree_period,
+            int mincoeff_period,
+            int xweight_period,
+            bool batched,
+            int n_threads,
+            const std::string& parallel
         ) {
-            int _maxdegree = maxdegree.has_value() ? maxdegree.value() : ff_ulong::DIGITS;
-            ff_float _mincoeff = mincoeff.has_value() ? mincoeff.value() : 0;
-            if(observable.index() == 0) {
-                // PauliString
-                return pauli_gates::propagate(circuit, PauliPolynomial(std::get<0>(observable)), _maxdegree, _mincoeff);
-            } else {
-                // PauliPolynomial
-                return pauli_gates::propagate(circuit, std::get<1>(observable), _maxdegree, _mincoeff);
-            }
-        }, py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
+            pauli_gates::PauliTruncation truncation;
+            warn_if_no_openmp(n_threads);
+            truncation.maxdegree = maxdegree.value_or(INT_MAX);
+            truncation.mincoeff = mincoeff.value_or(0);
+            truncation.topk = topk.value_or(0);
+            truncation.max_xweight = max_xweight.value_or(-1);
+            truncation.maxdegree_period = maxdegree_period;
+            truncation.mincoeff_period = mincoeff_period;
+            truncation.xweight_period = xweight_period;
+            const PauliPolynomial obs = observable.index() == 0 ? PauliPolynomial(std::get<0>(observable)) : std::get<1>(observable);
+            return pauli_gates::propagate(circuit, obs, truncation, batched, n_threads, parallel);
+        },
+        py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
+        py::arg("topk") = py::none(), py::arg("max_xweight") = py::none(), py::arg("maxdegree_period") = 1,
+        py::arg("mincoeff_period") = 1, py::arg("xweight_period") = 1, py::arg("batched") = false,
+        py::arg("n_threads") = 1, py::arg("parallel") = "auto",
+        py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Backpropagates a polynomial through a circuit.
-        If maxdegree is specified, truncates any term of degree larger than maxdegree.
-        Note: the truncation only happens after applying non-Clifford gates (i.e., ROT gates).
-        So the output of propagate may have degree larger than maxdegree.
+
+        Truncation rules, all off by default:
+        * maxdegree: discards the terms of degree larger than maxdegree. By default the truncation
+          happens as soon as a term is created by a non-Clifford gate (i.e., a ROT gate), so the output
+          has degree larger than maxdegree only through Clifford gates or the initial observable. With
+          maxdegree_period=p > 1 the terms are instead only discarded after every p-th ROT gate.
+        * mincoeff: discards the terms of magnitude at most mincoeff after every mincoeff_period-th ROT gate.
+        * topk: keeps only the topk terms of largest magnitude, after every ROT gate.
+        * max_xweight: discards the terms with more than max_xweight X or Y factors, as they are created
+          by default or after every xweight_period-th ROT gate if xweight_period > 1.
+
+        With batched=True, consecutive commuting ROT gates are applied together and the rules fire once
+        per such batch (a rule with period p fires after every batch containing a p-th gate), which
+        changes the result under mincoeff or topk. trunc_stats() returns statistics of the last call,
+        including a bound on the error due to mincoeff.
+
+        With n_threads > 1 the propagation runs on that many OpenMP threads (a build without OpenMP
+        ignores it), the terms being partitioned between the threads (parallel="sharded", the default
+        when n_threads > 1; parallel="serial" forces one thread). The results do not depend on the
+        number of threads, up to rounding (which may change the terms topk keeps in case of ties).
 
         Examples:
         >>> from fastfermion import H, CNOT, propagate
@@ -405,34 +479,46 @@ void add_majorana_propagation(py::module_& m) {
             const majorana_gates::MajoranaCircuit& circuit,
             const std::variant<MajoranaString,MajoranaPolynomial>& observable,
             const std::optional<int>& maxdegree,
-            const std::optional<ff_float>& mincoeff
+            const std::optional<ff_float>& mincoeff,
+            const std::optional<int>& topk,
+            const std::optional<int>& max_unpaired,
+            int maxdegree_period,
+            int mincoeff_period,
+            int unpaired_period,
+            bool batched,
+            int n_threads,
+            const std::string& parallel
         ) {
-            ff_float mincoeffval = mincoeff.has_value() ? mincoeff.value() : 0;
-            if(observable.index() == 0) {
-                // MajoranaString
-                if(maxdegree.has_value()) {
-                    return majorana_gates::propagate(circuit, MajoranaPolynomial(std::get<0>(observable)), maxdegree.value(), mincoeffval);
-                } else {
-                    return majorana_gates::propagate(circuit, MajoranaPolynomial(std::get<0>(observable)), mincoeffval);
-                }
-            } else {
-                // MajoranaPolynomial
-                if(maxdegree.has_value()) {
-                    return majorana_gates::propagate(circuit, std::get<1>(observable), maxdegree.value(), mincoeffval);
-                } else {
-                    return majorana_gates::propagate(circuit, std::get<1>(observable), mincoeffval);
-                }
-            }
+            majorana_gates::MajoranaTruncation truncation;
+            warn_if_no_openmp(n_threads);
+            truncation.maxdegree = maxdegree.value_or(INT_MAX);
+            truncation.mincoeff = mincoeff.value_or(0);
+            truncation.topk = topk.value_or(0);
+            truncation.max_unpaired = max_unpaired.value_or(-1);
+            truncation.maxdegree_period = maxdegree_period;
+            truncation.mincoeff_period = mincoeff_period;
+            truncation.unpaired_period = unpaired_period;
+            const MajoranaPolynomial obs = observable.index() == 0 ? MajoranaPolynomial(std::get<0>(observable)) : std::get<1>(observable);
+            return majorana_gates::propagate(circuit, obs, truncation, batched, n_threads, parallel);
         },
-        py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(), py::arg("mincoeff") = 0,
+        py::arg("circuit"), py::arg("observable"), py::arg("maxdegree") = py::none(), py::arg("mincoeff") = py::none(),
+        py::arg("topk") = py::none(), py::arg("max_unpaired") = py::none(), py::arg("maxdegree_period") = 1,
+        py::arg("mincoeff_period") = 1, py::arg("unpaired_period") = 1, py::arg("batched") = false,
+        py::arg("n_threads") = 1, py::arg("parallel") = "auto",
+        py::call_guard<py::gil_scoped_release>(),
         R"DOC(
         Backpropagates a Majorana polynomial through a Majorana circuit.
-        If maxdegree is specified, truncates any term of degree larger than maxdegree.
+
+        The truncation rules maxdegree, mincoeff and topk, their periods and batched are as in the
+        Pauli propagate. max_unpaired discards the terms with more than max_unpaired unpaired modes
+        (modes with exactly one of their two Majorana operators in the term), as they are created by
+        default or after every unpaired_period-th gate if unpaired_period > 1; such terms have zero
+        expectation in every Fock state. n_threads and parallel are as in the Pauli propagate.
 
         Examples:
-        >>> from fastfermion import MROT, propagate
-        >>> circuit = [MROT(MajoranaString([0,1]))]
-        >>> observable = PauliString("XZ")
+        >>> from fastfermion import MROT, MajoranaString, propagate
+        >>> circuit = [MROT(MajoranaString([0,1]),1j,1.0)]
+        >>> observable = MajoranaString([0,2])
         >>> result = propagate(circuit,observable,maxdegree=3)
         )DOC"
     );
@@ -646,6 +732,7 @@ PYBIND11_MODULE(ffcore, m, py::mod_gil_not_used()) {
         .def(py::init<const std::vector<int>&>())
         .def("extent", &MajoranaString::extent)
         .def("degree", &MajoranaString::degree)
+        .def("unpaired", &MajoranaString::unpaired)
         .def("indices", &MajoranaString::support_set)
         .def("is_hermitian", &MajoranaString::is_hermitian)
         .def("commutes", py::overload_cast<const MajoranaString&>(&MajoranaString::commutes, py::const_))
@@ -714,6 +801,7 @@ PYBIND11_MODULE(ffcore, m, py::mod_gil_not_used()) {
     add_states(m);
     
     add_pauli_gates(m);
+    add_propagation_common(m);
     add_pauli_propagation(m);
 
     add_majorana_propagation(m);

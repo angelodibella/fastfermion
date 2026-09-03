@@ -15,7 +15,7 @@ Computing the Jordan-Wigner transform of a CrO molecule Hamiltonian with > 10<su
 * Fermionic and Majorana operators are automatically put in normal ordered form
 * Conversion between Pauli, Fermi, and Majorana representations (Jordan-Wigner and reverse Jordan-Wigner)
 * Sparse matrix representations
-* Heisenberg evolution: Propagate polynomial through a sequence of unitaries/gates with possible truncation by degree
+* Heisenberg evolution: Propagate polynomial through a sequence of unitaries/gates with truncation by degree, coefficient magnitude or number of terms, on one or several threads (OpenMP)
 * Interface with OpenFermion and Cirq
 * Up to 200x faster than OpenFermion
 * More to come ...
@@ -38,7 +38,7 @@ from Python. See the `examples` folder to get started, or check out [this tour o
 
 ### Building from source
 
-Building requires a C++20 compiler and the Python packages `meson`, `meson-python`, `ninja` and `pybind11`. From the root directory of the package:
+Building requires a C++20 compiler (`pip` installs the build dependencies `meson`, `meson-python`, `ninja` and `pybind11` itself). From the root directory of the package:
 
 ```shell
 pip3 install .
@@ -52,6 +52,6 @@ For development, `make ffcore` compiles the binary `ffcore...` in place inside t
 >>> import fastfermion
 ```
 
-For systems of at most 64 qubits, the meson option `-Dkey_words=1` makes the Pauli string key a single machine word, which is faster (`pip3 install -Csetup-args=-Dkey_words=1 .`).
+OpenMP is used when the compiler supports it: `propagate(circuit, observable, n_threads=8)` runs on 8 threads. For systems of at most 64 qubits, the meson option `-Dkey_words=1` makes the Pauli string key a single machine word (and halves the Fermi and Majorana keys), which is faster (`pip3 install -Csetup-args=-Dkey_words=1 .`).
 
 You could also use the library directly in your C++ project (even though the library was primarily intended to be used in Python). It is header-only, so you can just include the relevant header files from `src/`.

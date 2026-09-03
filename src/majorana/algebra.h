@@ -64,6 +64,14 @@ struct MajoranaString {
     std::string to_string() const { return to_compact_string(); }
     std::vector<int> support_set() const { return alpha.support(); }
     int degree() const { return alpha.popcount(); }
+    int unpaired() const {
+        // Number of modes j such that exactly one of the two Majorana operators 2j, 2j+1 is in the string
+        int u = 0;
+        for(std::size_t i=0; i<alpha.words.size(); i++) {
+            u += std::popcount((alpha.words[i] ^ (alpha.words[i] >> 1)) & 0x5555555555555555ULL);
+        }
+        return u;
+    }
     bool is_hermitian() const {
         int degmod4 = degree() % 4;
         return degmod4 == 0 || degmod4 == 1;
@@ -134,6 +142,7 @@ struct MajoranaMonomial {
     int extent() const { return s.extent(); }
     std::vector<int> support_set() const { return s.support_set(); }
     int degree() const { return s.degree(); }
+    int unpaired() const { return s.unpaired(); }
     MajoranaMonomial& operator*=(const ff_complex& b) { coeff *= b; return *this; }
     bool is_hermitian() const {
         bool s_hermitian = s.is_hermitian();

@@ -118,3 +118,44 @@ def fermistringstuple(n):
 def majoranastringstuple(n):
     """Returns iterator on all MajoranaStrings as tuples"""
     return subsets(range(n))
+
+
+def _angles(k, seed):
+    """k factors for the gate angles: all 1, or random in [1, 1.1) if a seed is given (no two gates equal)"""
+    return np.ones(k) if seed is None else 1 + 0.1 * np.random.default_rng(seed).random(k)
+
+def tfim_circuit(n, dt, seed=None):
+    """One Trotter step of the transverse-field Ising ring on n qubits"""
+    a = _angles(2 * n, seed)
+    return [ff.ROT("ZZ", [i, (i + 1) % n], -2 * dt * a[i]) for i in range(n)] + \
+           [ff.ROT("X", [i], -2 * dt * a[n + i]) for i in range(n)]
+
+def heisenberg_circuit(n, dt, seed=None):
+    """One Trotter step of the Heisenberg ring on n qubits"""
+    a = _angles(3 * n, seed)
+    return [ff.ROT(op, [i, (i + 1) % n], 2 * dt * a[3 * i + k]) for i in range(n) for k, op in enumerate(("XX", "YY", "ZZ"))]
+
+def tv_circuit(M, t, V, dt, steps, seed=None):
+    """steps Trotter steps of the spinless t-V chain on M modes as Majorana rotations"""
+    a = _angles(5 * (M - 1), seed)
+    gates = []
+    for j in range(M - 1):
+        m = 2 * j  # first Majorana operator of mode j
+        gates.append(ff.MROT(ff.MajoranaString([m + 1, m + 2]), -t * dt * a[5 * j]))
+        gates.append(ff.MROT(ff.MajoranaString([m, m + 3]), t * dt * a[5 * j + 1]))
+        if V != 0:
+            gates.append(ff.MROT(ff.MajoranaString([m, m + 1]), V / 2 * dt * a[5 * j + 2]))
+            gates.append(ff.MROT(ff.MajoranaString([m + 2, m + 3]), V / 2 * dt * a[5 * j + 3]))
+            gates.append(ff.MROT(ff.MajoranaString([m, m + 1, m + 2, m + 3]), -V / 2 * dt * a[5 * j + 4]))
+    return gates * steps
+
+def poly_terms(p):
+    """The terms of a polynomial as a dict string -> complex coefficient"""
+    return {str(k): complex(v) for k, v in p.terms.items()}
+
+def assert_poly_close(a, b, tol=1e-12):
+    """Checks that two polynomials have the same terms, with coefficients within tol"""
+    da, db = poly_terms(a), poly_terms(b)
+    assert da.keys() == db.keys(), f"terms differ: {da.keys() ^ db.keys()}"
+    for k in da:
+        assert abs(da[k] - db[k]) <= tol, f"coefficient of {k}: {da[k]} vs {db[k]}"
